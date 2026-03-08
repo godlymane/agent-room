@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+*.db
+*.db-shm
+*.db-wal
+fix-bmc-links.mjs
+output/.env.local
+workspace/
