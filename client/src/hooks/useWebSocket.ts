@@ -113,12 +113,21 @@ export function useWebSocket() {
     }
   }, []);
 
+  const adminHeaders = (): HeadersInit => {
+    const token = import.meta.env.VITE_ADMIN_API_TOKEN;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  };
+
   const startAgent = useCallback(() => {
-    fetch('/api/agent/start', { method: 'POST' });
+    fetch('/api/agent/start', { method: 'POST', headers: adminHeaders() })
+      .then(r => { if (!r.ok) console.error('Failed to start agent:', r.status, r.statusText); })
+      .catch(err => console.error('Failed to start agent:', err));
   }, []);
 
   const stopAgent = useCallback(() => {
-    fetch('/api/agent/stop', { method: 'POST' });
+    fetch('/api/agent/stop', { method: 'POST', headers: adminHeaders() })
+      .then(r => { if (!r.ok) console.error('Failed to stop agent:', r.status, r.statusText); })
+      .catch(err => console.error('Failed to stop agent:', err));
   }, []);
 
   const respondApproval = useCallback((id: string, approved: boolean) => {

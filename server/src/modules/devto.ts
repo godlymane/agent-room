@@ -1,4 +1,5 @@
 import { logActivity } from '../db.js';
+import { findPublishIssue } from './content-guard.js';
 
 const DEVTO_API = 'https://dev.to/api';
 
@@ -27,6 +28,8 @@ export async function handleDevtoTool(name: string, input: any): Promise<string>
     case 'devto_publish_article': {
       const { title, body_markdown, tags, series } = input;
       if (!title || !body_markdown) return 'Error: title and body_markdown required';
+      const issue = findPublishIssue(`${title}\n${body_markdown}`);
+      if (issue) return `Not published — ${issue}`;
 
       try {
         const article = await devtoAPI('/articles', 'POST', {

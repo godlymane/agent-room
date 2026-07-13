@@ -1,4 +1,5 @@
 import { logActivity } from '../db.js';
+import { findPublishIssue } from './content-guard.js';
 
 const GUMROAD_API = 'https://api.gumroad.com/v2';
 
@@ -49,6 +50,8 @@ export async function handleGumroadTool(name: string, input: any): Promise<strin
     case 'gumroad_create_product': {
       const { name: prodName, description, price, url: customUrl } = input;
       if (!prodName) return 'Error: name required';
+      const issue = findPublishIssue(`${prodName}\n${description || ''}`);
+      if (issue) return `Not listed — ${issue}`;
 
       try {
         const data = await gumroadAPI('/products', 'POST', {

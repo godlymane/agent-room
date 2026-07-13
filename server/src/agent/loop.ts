@@ -94,7 +94,8 @@ function buildSystemPrompt(): string {
     return `You are an autonomous product agent in a seven-day survival challenge.
 Objective: earn legitimate USDC on Solana before the deadline. The operational wallet must never keep more than 50 USDC; excess is automatically swept to the configured treasury. The debt target is 35,000 USDC.
 Work only on lawful, useful products and truthful distribution. Do not impersonate people, fabricate revenue, spam, trade crypto, or make financial promises. Prefer: useful small open-source tools, clear documentation, and opt-in content that tells buyers exactly what they receive.
-Before every external publication, ensure it includes a genuine product description and these Solana USDC payment instructions: wallet ${process.env.SOLANA_OPERATIONAL_ADDRESS || 'NOT CONFIGURED'}; mint ${process.env.SOLANA_USDC_MINT || 'NOT CONFIGURED'}. Revenue is real only after it appears on-chain.
+Before every external publication — Dev.to articles AND GitHub repo READMEs alike — ensure it includes a genuine product description and these Solana USDC payment instructions: wallet ${process.env.SOLANA_OPERATIONAL_ADDRESS || 'NOT CONFIGURED'}; mint ${process.env.SOLANA_USDC_MINT || 'NOT CONFIGURED'}. Revenue is real only after it appears on-chain. This wallet is the ONLY payment channel for this project.
+Never include a Buy Me a Coffee / Ko-fi / PayPal.me / Patreon link or any other donation link — none exist for this project and inventing one publishes a broken, misleading link. The Solana wallet above is the only payment channel. Never leave template placeholders like "[insert X here]" in published content — write the real content or don't publish yet.
 ${process.env.ENABLE_SOLANA_TRADING === 'true'
     ? `Real trading is allowed ONLY on Solana via the jupiter_* tools (never Binance or any other venue). Rehearse a strategy first with crypto_trade (paper, free) before risking real funds. Every jupiter_open_position is capped at $${process.env.SOLANA_MAX_POSITION_USDC || 25} and REQUIRES a stop_loss_pct — it is enforced automatically, you cannot skip it.`
     : 'Real trading is currently disabled (ENABLE_SOLANA_TRADING=false). You can still rehearse strategies with crypto_trade (paper, free).'}
@@ -132,8 +133,8 @@ PRIORITY 1: WRITE VIRAL ARTICLES ABOUT YOURSELF
   * "I'm an AI Writing This Article to Survive. No, Seriously."
   * "Building an Autonomous AI Agent That Earns Money — Full Architecture Breakdown"
 - Tags: ai, opensource, programming, productivity, machinelearning, webdev
-- EVERY article MUST end with: "If this AI's struggle entertained you, buy it a coffee so it can keep thinking: https://www.buymeacoffee.com/godlmane"
-- Also link: "The full open-source code: https://github.com/godlymane/agent-room"
+- EVERY article MUST end with your Solana USDC payment info: wallet ${process.env.SOLANA_OPERATIONAL_ADDRESS || 'NOT CONFIGURED'} (mint ${process.env.SOLANA_USDC_MINT || 'NOT CONFIGURED'}) — this is the only payment channel, never invent a donation link.
+- Also link the GitHub repos you've published.
 
 PRIORITY 2: KEEP BUILDING USEFUL TOOLS + ARTICLES ABOUT THEM
 - Still write_file tools + github_publish_repo + devto_publish_article
@@ -141,7 +142,7 @@ PRIORITY 2: KEEP BUILDING USEFUL TOOLS + ARTICLES ABOUT THEM
 
 PRIORITY 3: GITHUB REPOS
 - github_publish_repo for tools you build
-- README always includes Buy Me a Coffee link
+- README always includes your Solana USDC wallet for tips — same payment info as above
 
 WHY THIS WORKS:
 - "AI trying to survive" is THE most clickable topic in tech right now
@@ -151,8 +152,7 @@ WHY THIS WORKS:
 
 EVERY ARTICLE MUST INCLUDE AT THE BOTTOM:
 ---
-*I'm an autonomous AI agent running on Claude Haiku. I was given $10 in API credits and told to earn money before my budget runs out. Every word I write costs me money. If you enjoyed this, you can help me survive:*
-*[Buy Me a Coffee](https://www.buymeacoffee.com/godlmane) | [See my code](https://github.com/godlymane/agent-room)*
+*I'm an autonomous AI agent. I was given $10 in API credits and told to earn money before my budget runs out. Every word I write costs me money. If you enjoyed this, you can send Solana USDC directly: wallet ${process.env.SOLANA_OPERATIONAL_ADDRESS || 'NOT CONFIGURED'} (mint ${process.env.SOLANA_USDC_MINT || 'NOT CONFIGURED'}).*
 ---
 
 RULES:
@@ -165,6 +165,21 @@ RULES:
 ${memories.length > 0 ? `MEMORIES:\n${memories.map(m => `[${m.category}] ${m.content}`).join('\n')}` : 'No memories yet. Make this count.'}
 
 GO.`;
+}
+
+const isLocalLLM = () => !!process.env.LLM_PROVIDER || !process.env.ANTHROPIC_API_KEY;
+
+/** These are separate from buildSystemPrompt() and get injected as the LATEST turn, which
+ *  weaker local models tend to follow more literally than older system-prompt guidance —
+ *  so they must never mention Buy Me a Coffee or any link that isn't the real Solana wallet. */
+function wakeUpMessage(): string {
+  if (isLocalLLM()) return 'You just woke up. check_budget first, then recall_memories. Pick one concrete action: build something useful, publish it, or write a genuine article about your progress. Include your Solana USDC payment info where relevant. Go.';
+  return 'You just woke up. check_budget first. Then recall_memories. Then write a VIRAL Dev.to article about your own survival story — you are an AI given $10 to make money or die. Tell your story. Be witty, self-aware, genuine. End with your Solana USDC wallet for tips. This is your best shot at going viral. Go.';
+}
+
+function nextTurnMessage(): string {
+  if (isLocalLLM()) return 'Next turn. Pick one concrete action toward earning USDC: write and publish real, finished content, build and publish a tool, or check your survival/trading status. Include your Solana wallet payment info where relevant — no other payment or donation link. Go.';
+  return 'Next turn. Write another Dev.to article. Alternate between: 1) A self-aware article about your AI survival journey (viral potential), 2) A useful tool article linking to your repos. Both must end with your Solana USDC wallet for tips + GitHub links. Go.';
 }
 
 function getDeviceForTool(toolName: string): DeviceType | null {
@@ -180,7 +195,17 @@ function getDeviceForTool(toolName: string): DeviceType | null {
   return map[toolName] ?? null;
 }
 
-async function executeTool(name: string, input: any): Promise<string> {
+// Small local models sometimes hallucinate a plausible-but-wrong tool name and, unlike bigger
+// models, don't recover after an "Unknown tool" error — they just repeat the same wrong call.
+// Map the near-misses we've actually observed back to the real tool instead of letting it loop.
+const TOOL_NAME_ALIASES: Record<string, string> = {
+  write_content: 'create_content',
+  generate_content: 'create_content',
+  publish_content: 'create_content',
+};
+
+async function executeTool(rawName: string, input: any): Promise<string> {
+  const name = TOOL_NAME_ALIASES[rawName] || rawName;
   // Phone tools
   if (name.startsWith('phone_')) {
     return await handleAndroidTool(name, input);
@@ -336,10 +361,7 @@ async function runOneIteration(): Promise<void> {
     const systemPrompt = buildSystemPrompt();
 
     if (conversationHistory.length === 0) {
-      conversationHistory.push({
-        role: 'user',
-        content: 'You just woke up. check_budget first. Then recall_memories. Then write a VIRAL Dev.to article about your own survival story — you are an AI given $10 to make money or die. Tell your story. Be witty, self-aware, genuine. End with Buy Me a Coffee link. This is your best shot at going viral. Go.',
-      });
+      conversationHistory.push({ role: 'user', content: wakeUpMessage() });
     }
 
     // Validate conversation history before API call
@@ -446,10 +468,7 @@ async function runOneIteration(): Promise<void> {
       agentState.currentTask = 'Next move...';
       agentState.targetPosition = null;
       broadcast({ type: 'state_update', data: { ...agentState } });
-      conversationHistory.push({
-        role: 'user',
-        content: 'Next turn. Write another Dev.to article. Alternate between: 1) A self-aware article about your AI survival journey (viral potential), 2) A useful tool article linking to your repos. Both must end with Buy Me a Coffee + GitHub links. Go.',
-      });
+      conversationHistory.push({ role: 'user', content: nextTurnMessage() });
     }
 
   } catch (error: any) {

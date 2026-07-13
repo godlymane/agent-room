@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { logActivity } from '../db.js';
 import { outputDir } from '../paths.js';
+import { findPublishIssue } from './content-guard.js';
 
 const GITHUB_API = 'https://api.github.com';
 const OUTPUT_DIR = outputDir;
@@ -39,6 +40,10 @@ export async function handleGithubPublishTool(name: string, input: any): Promise
       const { repo_name, description, files } = input;
       if (!repo_name) return 'Error: repo_name required';
       if (!files || !Array.isArray(files) || files.length === 0) return 'Error: files array required (paths relative to output/)';
+      if (description) {
+        const issue = findPublishIssue(description);
+        if (issue) return `Not published — ${issue}`;
+      }
 
       try {
         const username = await getUsername();
