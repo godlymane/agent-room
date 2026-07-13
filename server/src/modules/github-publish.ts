@@ -1,9 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 import { logActivity } from '../db.js';
+import { outputDir } from '../paths.js';
 
 const GITHUB_API = 'https://api.github.com';
-const OUTPUT_DIR = 'C:/Users/devda/agent-room/output';
+const OUTPUT_DIR = outputDir;
 
 function getToken(): string {
   const token = process.env.GITHUB_TOKEN;

@@ -20,6 +20,34 @@ export interface Budget {
   runway: number;         // estimated turns remaining
 }
 
+export interface TradingPosition {
+  id: string;
+  openedAt: number;
+  closedAt: number | null;
+  outputMint: string;
+  symbol: string | null;
+  amountUsdc: number;
+  tokenAmount: number;
+  entryPrice: number;
+  stopLossPct: number;
+  stopLossPrice: number;
+  status: 'open' | 'closed_manual' | 'closed_stop';
+  exitPrice: number | null;
+  pnlUsdc: number | null;
+}
+
+export interface SurvivalStatus {
+  startedAt: number;
+  deadlineAt: number;
+  firstRevenueAt: number | null;
+  state: 'active' | 'free' | 'dead';
+  operationalCapUsdc: number;
+  debtTargetUsdc: number;
+  debtPaidUsdc: number;
+  treasuryAddress: string;
+  mode: 'simulation' | 'live';
+}
+
 export interface Transaction {
   id: string;
   timestamp: number;

@@ -7,6 +7,13 @@ const obj = (props: Record<string, any>, required: string[] = []): Schema => ({
 const str = (desc: string) => ({ type: 'string' as const, description: desc });
 const num = (desc: string) => ({ type: 'number' as const, description: desc });
 
+const jupiterTools: Anthropic.Tool[] = [
+  { name: 'jupiter_get_quote', description: 'Check the current price for a token on Solana via Jupiter, before opening a real position. Read-only, no funds moved.', input_schema: obj({ output_mint: str('Token mint address to price'), amount_usdc: num('USDC amount to simulate') }, ['output_mint', 'amount_usdc']) },
+  { name: 'jupiter_open_position', description: `Open a REAL Solana position via Jupiter, funded from the operational wallet. Max $${process.env.SOLANA_MAX_POSITION_USDC || 25} per position. stop_loss_pct is REQUIRED — the position is automatically market-sold if price drops that % below entry.`, input_schema: obj({ output_mint: str('Token mint address to buy'), amount_usdc: num('USDC to spend, max per-position cap applies'), stop_loss_pct: num('Required. % below entry price that triggers an automatic sell (2-50).'), symbol: str('Optional ticker/label for display'), reason: str('Why this trade') }, ['output_mint', 'amount_usdc', 'stop_loss_pct']) },
+  { name: 'jupiter_list_positions', description: 'List open and recently closed real Solana positions with P&L', input_schema: obj({}) },
+  { name: 'jupiter_close_position', description: 'Manually close an open real Solana position (market sell back to USDC)', input_schema: obj({ position_id: str('Position id from jupiter_list_positions') }, ['position_id']) },
+];
+
 export const agentTools: Anthropic.Tool[] = [
   // === THINKING ===
   { name: 'think', description: 'Internal reasoning shown as thought bubble. Be brief — every token costs money.', input_schema: obj({ reasoning: str('Your thinking') }, ['reasoning']) },
@@ -42,8 +49,6 @@ export const agentTools: Anthropic.Tool[] = [
   { name: 'crypto_check_market', description: 'Get price, volume, SMA, trend for a crypto pair', input_schema: obj({ symbol: str('e.g. BTCUSDT'), timeframe: { type: 'string', enum: ['1m', '5m', '15m', '1h', '4h', '1d'] } }, ['symbol']) },
   { name: 'crypto_trade', description: 'Paper trade (simulated)', input_schema: obj({ symbol: str('Pair'), side: { type: 'string', enum: ['buy', 'sell'] }, amount: num('USDT amount'), reason: str('Why') }, ['symbol', 'side', 'amount', 'reason']) },
   { name: 'crypto_portfolio', description: 'Check paper trading portfolio', input_schema: obj({}) },
-  { name: 'crypto_real_balance', description: 'Check REAL Binance balance (needs API keys)', input_schema: obj({}) },
-  { name: 'crypto_real_trade', description: 'Place a REAL trade on Binance (needs API keys + BINANCE_REAL=true)', input_schema: obj({ symbol: str('Pair like BTCUSDT'), side: { type: 'string', enum: ['buy', 'sell'] }, amount: num('USDT amount') }, ['symbol', 'side', 'amount']) },
 
   // === GITHUB PUBLISH ===
   { name: 'github_publish_repo', description: 'Create a public GitHub repo and push files from output/ to it. This makes your tools visible to the world. Include a good README with install instructions and a "Buy Me a Coffee" link.', input_schema: obj({ repo_name: str('Repository name (kebab-case, e.g. "pdf-merger-cli")'), description: str('Short repo description'), files: { type: 'array', items: { type: 'string' }, description: 'Array of file paths relative to output/ to push (e.g. ["pdf_merger.py", "README.md"])' } }, ['repo_name', 'files']) },
@@ -59,4 +64,7 @@ export const agentTools: Anthropic.Tool[] = [
 
   // === HUMAN ===
   { name: 'request_approval', description: 'Ask human for approval on something big', input_schema: obj({ action: str('What you want to do'), amount: num('Dollar amount (0 if none)'), reason: str('Why') }, ['action', 'reason']) },
+
+  // === SOLANA TRADING (real money, Solana-only, gated) ===
+  ...(process.env.ENABLE_SOLANA_TRADING === 'true' ? jupiterTools : []),
 ];

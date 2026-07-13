@@ -1,24 +1,4 @@
-import crypto from 'crypto';
 import { logActivity, logTransaction } from '../db.js';
-
-// === Real Binance API (when enabled) ===
-const BINANCE_KEY = process.env.BINANCE_API_KEY || '';
-const BINANCE_SECRET = process.env.BINANCE_SECRET || '';
-const USE_REAL = process.env.BINANCE_REAL === 'true' && BINANCE_KEY && BINANCE_SECRET;
-const BINANCE_BASE = USE_REAL ? 'https://api.binance.com' : 'https://testnet.binance.vision';
-
-async function binanceSigned(endpoint: string, params: Record<string, string> = {}, method = 'GET') {
-  if (!BINANCE_KEY || !BINANCE_SECRET) return { error: 'Binance API keys not configured' };
-  const timestamp = Date.now().toString();
-  const queryString = new URLSearchParams({ ...params, timestamp }).toString();
-  const signature = crypto.createHmac('sha256', BINANCE_SECRET).update(queryString).digest('hex');
-  const url = `${BINANCE_BASE}${endpoint}?${queryString}&signature=${signature}`;
-  const res = await fetch(url, {
-    method,
-    headers: { 'X-MBX-APIKEY': BINANCE_KEY },
-  });
-  return res.json();
-}
 
 // Paper trading state (in-memory, could persist to DB)
 interface Position {
@@ -103,36 +83,6 @@ export async function handleCryptoTool(name: string, input: any): Promise<string
 
       logActivity({ type: 'action', message: `Checked ${symbol}: $${ticker.price}`, device: 'dashboard' });
       return `${symbol}\nPrice: $${ticker.price}\n24h Change: ${ticker.change24h > 0 ? '+' : ''}${ticker.change24h.toFixed(2)}%\nVolume: $${(ticker.volume / 1e6).toFixed(1)}M${analysis}`;
-    }
-
-    case 'crypto_real_balance': {
-      if (!USE_REAL) return 'Real trading not enabled. Set BINANCE_REAL=true and provide API keys in .env';
-      const data = await binanceSigned('/api/v3/account');
-      if (data.error) return data.error;
-      const nonZero = (data.balances || []).filter((b: any) => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0);
-      return `Real Binance Balance:\n${nonZero.map((b: any) => `  ${b.asset}: ${b.free} (locked: ${b.locked})`).join('\n') || '  Empty'}`;
-    }
-
-    case 'crypto_real_trade': {
-      if (!USE_REAL) return 'Real trading not enabled. Set BINANCE_REAL=true in .env';
-      const symbol = input.symbol?.toUpperCase();
-      const side = input.side?.toUpperCase();
-      const quoteAmount = input.amount;
-      if (!symbol || !side || !quoteAmount) return 'Need symbol, side, and amount';
-
-      // Market order using quoteOrderQty (spend exact USDT amount)
-      const result = await binanceSigned('/api/v3/order', {
-        symbol, side, type: 'MARKET',
-        quoteOrderQty: quoteAmount.toString(),
-      }, 'POST');
-
-      if (result.code) return `Binance error: ${result.msg}`;
-
-      const filled = result.executedQty;
-      const cost = result.cummulativeQuoteQty;
-      logTransaction({ type: side === 'BUY' ? 'expense' : 'earning', amount: parseFloat(cost), description: `Real ${side} ${symbol}: ${filled} @ market`, module: 'crypto' });
-      logActivity({ type: side === 'BUY' ? 'action' : 'earning', message: `REAL ${side} ${symbol}: ${filled} for $${cost}`, device: 'dashboard' });
-      return `REAL ${side} executed:\nSymbol: ${symbol}\nFilled: ${filled}\nCost: $${cost}\nStatus: ${result.status}`;
     }
 
     case 'crypto_trade': {

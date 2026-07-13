@@ -1,4 +1,5 @@
 import { getBudgetStats } from '../db.js';
+import { getSurvivalStatus } from '../modules/solana-survival.js';
 import type { AgentConfig } from '../../../shared/types.js';
 
 let config: AgentConfig = {
@@ -6,7 +7,7 @@ let config: AgentConfig = {
   approvalThreshold: parseFloat(process.env.APPROVAL_THRESHOLD || '10'),
   maxDailySpend: parseFloat(process.env.MAX_DAILY_SPEND || '10'),
   paused: false,
-  allowedModules: ['agent', 'crypto', 'freelance', 'content', 'web-tasks', 'browser'],
+  allowedModules: ['agent', 'crypto', 'freelance', 'content', 'web-tasks', 'browser', 'solana-trading'],
   opusThreshold: 'critical_only',  // maximize Haiku usage to save money
 };
 
@@ -31,8 +32,15 @@ export function checkAction(module: string, amount: number, description: string)
 
   const budget = getBudgetStats(config.initialBudget);
 
+  // The survival challenge replaces the old "$10 of API credit" death condition.
+  // API-provider billing still has to be funded outside the operational wallet.
+  const survival = getSurvivalStatus();
+  if (survival.state === 'dead') {
+    return { allowed: false, reason: 'Seven-day deadline passed without any on-chain revenue' };
+  }
+
   // Check if we're out of money
-  if (budget.balance <= 0) {
+  if (config.initialBudget > 0 && budget.balance <= 0) {
     return { allowed: false, reason: `Budget exhausted. Balance: $${budget.balance.toFixed(4)}` };
   }
 

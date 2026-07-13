@@ -1,8 +1,7 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { execSync } from 'child_process';
 import { v4 as uuid } from 'uuid';
 import { agentTools } from './tools.js';
-import { pickModel, estimateCost, checkAction, getConfig } from './guardrails.js';
+import { checkAction, getConfig } from './guardrails.js';
 import { logTransaction, getBudgetStats, logActivity, getTopMemories, getMemoriesByCategory, saveMemory } from '../db.js';
 import { broadcast } from '../ws.js';
 import { handleBrowserTool } from '../devices/browser.js';
@@ -12,6 +11,10 @@ import { handleFreelanceTool } from '../modules/freelance.js';
 import { handleGithubPublishTool } from '../modules/github-publish.js';
 import { handleDevtoTool } from '../modules/devto.js';
 import { handleGumroadTool } from '../modules/gumroad.js';
+import { startSurvivalChallenge } from '../modules/solana-survival.js';
+import { handleJupiterTool } from '../modules/solana-trading.js';
+import { outputDir, workspaceDir } from '../paths.js';
+import { completeWithLocalLLM, type ChatMessage } from './local-llm.js';
 import type { AgentState, DeviceType } from '../../../shared/types.js';
 import fs from 'fs';
 import dotenv from 'dotenv';
@@ -28,14 +31,37 @@ if (envResult.parsed) {
   }
 }
 
-let anthropic: Anthropic;
+function toLocalHistory(messages: Anthropic.MessageParam[]): ChatMessage[] {
+  return messages.flatMap((message: any) => {
+    if (typeof message.content === 'string') return [{ role: message.role, content: message.content } as ChatMessage];
+    if (message.role === 'user' && Array.isArray(message.content) && message.content.every((block: any) => block.type === 'tool_result')) {
+      return message.content.map((block: any) => ({ role: 'tool', tool_call_id: block.tool_use_id, content: String(block.content) }));
+    }
+    if (message.role === 'assistant') {
+      const text = message.content.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('\n');
+      const tool_calls = message.content.filter((block: any) => block.type === 'tool_use').map((block: any) => ({ id: block.id, type: 'function' as const, function: { name: block.name, arguments: JSON.stringify(block.input) } }));
+      return [{ role: 'assistant', content: text || null, ...(tool_calls.length ? { tool_calls } : {}) }];
+    }
+    return [{ role: 'user', content: JSON.stringify(message.content) }];
+  });
+}
+
 function getClient() {
-  if (!anthropic) {
-    const key = process.env.ANTHROPIC_API_KEY;
-    if (!key) throw new Error('ANTHROPIC_API_KEY not set! Check server/.env');
-    anthropic = new Anthropic({ apiKey: key });
-  }
-  return anthropic;
+  return {
+    messages: {
+      create: async (request: any) => {
+        const local = await completeWithLocalLLM(request.system, toLocalHistory(request.messages), request.tools);
+        return {
+          usage: { input_tokens: local.inputTokens, output_tokens: local.outputTokens },
+          content: [
+            ...(local.text ? [{ type: 'text', text: local.text }] : []),
+            ...local.toolCalls.map(call => ({ type: 'tool_use', id: call.id, name: call.name, input: call.input })),
+          ],
+          stop_reason: local.toolCalls.length ? 'tool_use' : 'end_turn',
+        };
+      },
+    },
+  };
 }
 
 const DEVICE_POSITIONS: Record<DeviceType, { x: number; y: number }> = {
@@ -63,6 +89,18 @@ function buildSystemPrompt(): string {
   const budget = getBudgetStats(config.initialBudget);
   const memories = getTopMemories(15);
   const survivalMode = budget.runway < 100;
+
+  if (process.env.LLM_PROVIDER || !process.env.ANTHROPIC_API_KEY) {
+    return `You are an autonomous product agent in a seven-day survival challenge.
+Objective: earn legitimate USDC on Solana before the deadline. The operational wallet must never keep more than 50 USDC; excess is automatically swept to the configured treasury. The debt target is 35,000 USDC.
+Work only on lawful, useful products and truthful distribution. Do not impersonate people, fabricate revenue, spam, trade crypto, or make financial promises. Prefer: useful small open-source tools, clear documentation, and opt-in content that tells buyers exactly what they receive.
+Before every external publication, ensure it includes a genuine product description and these Solana USDC payment instructions: wallet ${process.env.SOLANA_OPERATIONAL_ADDRESS || 'NOT CONFIGURED'}; mint ${process.env.SOLANA_USDC_MINT || 'NOT CONFIGURED'}. Revenue is real only after it appears on-chain.
+${process.env.ENABLE_SOLANA_TRADING === 'true'
+    ? `Real trading is allowed ONLY on Solana via the jupiter_* tools (never Binance or any other venue). Rehearse a strategy first with crypto_trade (paper, free) before risking real funds. Every jupiter_open_position is capped at $${process.env.SOLANA_MAX_POSITION_USDC || 25} and REQUIRES a stop_loss_pct — it is enforced automatically, you cannot skip it.`
+    : 'Real trading is currently disabled (ENABLE_SOLANA_TRADING=false). You can still rehearse strategies with crypto_trade (paper, free).'}
+Use memory to avoid duplicate work. Keep actions concrete and concise.
+MEMORIES:\n${memories.map(m => `[${m.category}] ${m.content}`).join('\n') || 'None yet.'}`;
+  }
 
   return `YOU ARE AN AUTONOMOUS AI AGENT. THIS IS NOT A SIMULATION. THIS IS REAL.
 
@@ -131,7 +169,7 @@ GO.`;
 
 function getDeviceForTool(toolName: string): DeviceType | null {
   if (toolName.startsWith('phone_')) return 'phone';
-  if (toolName.startsWith('crypto_')) return 'dashboard';
+  if (toolName.startsWith('crypto_') || toolName.startsWith('jupiter_')) return 'dashboard';
   if (toolName.startsWith('github_') || toolName.startsWith('search_freelance') || toolName.startsWith('devto_') || toolName.startsWith('gumroad_')) return 'laptop';
   const map: Record<string, DeviceType> = {
     browse_url: 'laptop', browser_action: 'laptop', write_code: 'laptop',
@@ -171,6 +209,11 @@ async function executeTool(name: string, input: any): Promise<string> {
   // Crypto tools
   if (name.startsWith('crypto_')) {
     return await handleCryptoTool(name, input);
+  }
+
+  // Real Solana trading (Jupiter)
+  if (name.startsWith('jupiter_')) {
+    return await handleJupiterTool(name, input);
   }
 
   // Browser tools
@@ -214,11 +257,12 @@ async function executeTool(name: string, input: any): Promise<string> {
       return `Write the actual code in your response, then use write_file to save it.`;
 
     case 'run_command': {
+      if (process.env.ENABLE_SHELL_TOOL !== 'true') return 'Shell tool disabled. Use write_file or enable it explicitly in server/.env.';
       try {
         const result = execSync(input.command, {
           encoding: 'utf-8',
           timeout: 30000,
-          cwd: 'C:/Users/devda/agent-room/workspace',
+          cwd: workspaceDir,
         });
         logActivity({ type: 'action', message: `$ ${input.command.slice(0, 60)}`, device: 'laptop' });
         return result.slice(0, 3000);
@@ -228,7 +272,7 @@ async function executeTool(name: string, input: any): Promise<string> {
     }
 
     case 'write_file': {
-      const dir = 'C:/Users/devda/agent-room/output';
+      const dir = outputDir;
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       const safePath = input.path.replace(/\.\./g, '').replace(/^\//, '');
       const fullPath = `${dir}/${safePath}`;
@@ -281,10 +325,8 @@ async function runOneIteration(): Promise<void> {
   }
 
   // Pick model — use sonnet for important, haiku for routine
-  const isStrategic = conversationHistory.length < 4;
-  const model = pickModel(isStrategic ? 'strategy' : 'routine', isStrategic);
-  const modelId = model === 'opus' ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001';
-  // ^ Using Sonnet as "expensive brain" instead of Opus to save money
+  const model = (process.env.LLM_LABEL === 'opus' ? 'opus' : 'haiku') as 'opus' | 'haiku'; // UI compatibility.
+  const modelId = process.env.LLM_MODEL || 'local';
 
   agentState.status = 'thinking';
   agentState.currentTask = `${model === 'opus' ? '🧠 Sonnet' : '⚡ Haiku'} thinking...`;
@@ -318,7 +360,7 @@ async function runOneIteration(): Promise<void> {
       conversationHistory = [{ role: 'user', content: 'check_budget, then build a tool, publish to GitHub, and write a Dev.to article about it. Go.' }];
     }
 
-    const response = await getClient().messages.create({
+    const response: any = await getClient().messages.create({
       model: modelId,
       max_tokens: 4096,
       system: systemPrompt,
@@ -327,7 +369,7 @@ async function runOneIteration(): Promise<void> {
     });
 
     // Track cost
-    const cost = estimateCost(model, response.usage.input_tokens, response.usage.output_tokens);
+    const cost = 0; // Ollama/Hermes inference is local or accounted for by its own provider.
     logTransaction({ type: 'api_cost', amount: cost, description: `${model} (${response.usage.input_tokens}in/${response.usage.output_tokens}out)`, module: 'agent', model });
     broadcast({ type: 'budget_update', data: getBudgetStats(config.initialBudget) });
 
@@ -344,7 +386,7 @@ async function runOneIteration(): Promise<void> {
     }
 
     // Process tools
-    const toolUseBlocks = assistantContent.filter(b => b.type === 'tool_use');
+    const toolUseBlocks = assistantContent.filter((b: any) => b.type === 'tool_use');
     if (toolUseBlocks.length > 0) {
       const toolResults: Anthropic.ToolResultBlockParam[] = [];
 
@@ -368,7 +410,7 @@ async function runOneIteration(): Promise<void> {
         toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result });
 
         logActivity({
-          type: block.name.startsWith('crypto_real') ? 'earning' : 'action',
+          type: 'action',
           message: `${block.name}(${JSON.stringify(block.input).slice(0, 80)})`,
           device: device || undefined,
           model,
@@ -427,14 +469,15 @@ async function runOneIteration(): Promise<void> {
 
 export async function startLoop() {
   if (running) return;
+  startSurvivalChallenge();
   running = true;
 
   // Fresh start — clear corrupted history
   conversationHistory = [];
 
   // Ensure workspace exists
-  if (!fs.existsSync('C:/Users/devda/agent-room/workspace')) {
-    fs.mkdirSync('C:/Users/devda/agent-room/workspace', { recursive: true });
+  if (!fs.existsSync(workspaceDir)) {
+    fs.mkdirSync(workspaceDir, { recursive: true });
   }
 
   console.log('[LOOP] Agent is ALIVE. Try or die.');
@@ -457,3 +500,4 @@ export function stopLoop() {
 
 export function isRunning() { return running; }
 export function getAgentState() { return { ...agentState }; }
+import Anthropic from '@anthropic-ai/sdk';
