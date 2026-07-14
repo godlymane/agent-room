@@ -196,14 +196,18 @@ async function sellPositionToUsdc(positionId: string): Promise<{ position: Tradi
   });
 }
 
+// The open logs the FULL principal as an expense, so the close must credit the full exit proceeds
+// (principal + P&L), not just |P&L|. Logging only the P&L left every position's principal
+// permanently "spent" in the books, silently draining the budget toward the death condition even
+// on break-even trades. Extracted as a pure function so the accounting is unit-tested.
+export function closeProceedsUsdc(amountUsdc: number, pnlUsdc: number): number {
+  return Math.max(0, amountUsdc + pnlUsdc);
+}
+
 function recordClose(position: TradingPositionRow, status: 'closed_manual' | 'closed_stop', close: { exitPrice: number; pnlUsdc: number; signature: string }) {
   closePositionRow(position.id, { status, exitPrice: close.exitPrice, pnlUsdc: close.pnlUsdc, exitSignature: close.signature });
-  // The open already logged the FULL principal as an expense, so the close must credit the full
-  // exit proceeds (principal + P&L), not just |P&L| — logging only the P&L left every position's
-  // principal permanently "spent" in the books, silently draining the budget toward the death
-  // condition even on break-even trades.
-  const proceedsUsdc = position.amount_usdc + close.pnlUsdc;
-  logTransaction({ type: 'earning', amount: Math.max(0, proceedsUsdc), description: `Closed Solana position ${position.symbol || position.output_mint} (${status}): proceeds $${proceedsUsdc.toFixed(2)} (P&L ${close.pnlUsdc >= 0 ? '+' : ''}$${close.pnlUsdc.toFixed(2)})`, module: 'solana-trading' });
+  const proceedsUsdc = closeProceedsUsdc(position.amount_usdc, close.pnlUsdc);
+  logTransaction({ type: 'earning', amount: proceedsUsdc, description: `Closed Solana position ${position.symbol || position.output_mint} (${status}): proceeds $${proceedsUsdc.toFixed(2)} (P&L ${close.pnlUsdc >= 0 ? '+' : ''}$${close.pnlUsdc.toFixed(2)})`, module: 'solana-trading' });
   logActivity({ type: close.pnlUsdc >= 0 ? 'earning' : 'action', message: `Closed ${position.symbol || position.output_mint}: ${close.pnlUsdc >= 0 ? '+' : ''}$${close.pnlUsdc.toFixed(2)} (${status})`, device: 'dashboard' });
 }
 

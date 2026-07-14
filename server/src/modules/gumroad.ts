@@ -45,6 +45,40 @@ async function gumroadAPI(endpoint: string, method = 'GET', body?: Record<string
   return data;
 }
 
+export interface GumroadStats {
+  configured: boolean;
+  productCount: number;
+  totalSales: number;
+  totalUsd: number;
+  top: Array<{ name: string; sales: number; usd: number; url: string }>;
+}
+
+/** Raw Gumroad metrics for the traction feedback loop. This is the channel that measures REAL
+ *  money (actual sales), so it's the signal the agent should weight most. Never throws. */
+export async function fetchGumroadStats(): Promise<GumroadStats> {
+  const empty: GumroadStats = { configured: false, productCount: 0, totalSales: 0, totalUsd: 0, top: [] };
+  if (!process.env.GUMROAD_ACCESS_TOKEN) return empty;
+  try {
+    const data = await gumroadAPI('/products');
+    const products = Array.isArray(data.products) ? data.products : [];
+    const mapped = products.map((p: any) => ({
+      name: p.name as string,
+      sales: p.sales_count || 0,
+      usd: (p.sales_usd_cents || 0) / 100,
+      url: (p.short_url || '') as string,
+    }));
+    return {
+      configured: true,
+      productCount: mapped.length,
+      totalSales: mapped.reduce((s: number, p: { sales: number }) => s + p.sales, 0),
+      totalUsd: mapped.reduce((s: number, p: { usd: number }) => s + p.usd, 0),
+      top: mapped.sort((a: { usd: number }, b: { usd: number }) => b.usd - a.usd).slice(0, 3),
+    };
+  } catch {
+    return { ...empty, configured: true };
+  }
+}
+
 export async function handleGumroadTool(name: string, input: any): Promise<string> {
   switch (name) {
     case 'gumroad_create_product': {

@@ -2,7 +2,9 @@ import Database from 'better-sqlite3';
 import { v4 as uuid } from 'uuid';
 import type { Transaction, MemoryEntry, Activity } from '../../shared/types.js';
 
-const db = new Database('agent-room.db');
+// Path is overridable so tests can point at a throwaway/':memory:' database instead of the
+// real agent-room.db in the working directory.
+const db = new Database(process.env.AGENT_DB_PATH || 'agent-room.db');
 db.pragma('journal_mode = WAL');
 
 // Initialize tables
@@ -43,6 +45,14 @@ db.exec(`
     amount_usd REAL NOT NULL,
     signature TEXT,
     mode TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS publications (
+    id TEXT PRIMARY KEY,
+    timestamp INTEGER NOT NULL,
+    channel TEXT NOT NULL,
+    title TEXT,
+    url TEXT,
+    content_hash TEXT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS trading_positions (
     id TEXT PRIMARY KEY,
@@ -153,6 +163,29 @@ export function recordSurvivalPayment(payment: { amountUsdc: number; signature?:
 
 export function getSurvivalPaidUsdc(): number {
   return (db.prepare('SELECT COALESCE(SUM(amount_usd), 0) AS total FROM survival_payments').get() as { total: number }).total;
+}
+
+// === Publications (cadence limiting + content dedup) ===
+export interface PublicationRow {
+  id: string;
+  timestamp: number;
+  channel: string;
+  title: string | null;
+  url: string | null;
+  content_hash: string;
+}
+
+export function recordPublication(pub: { channel: string; title?: string; url?: string; contentHash: string }) {
+  db.prepare('INSERT INTO publications (id, timestamp, channel, title, url, content_hash) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(uuid(), Date.now(), pub.channel, pub.title || null, pub.url || null, pub.contentHash);
+}
+
+export function countPublicationsSince(channel: string, sinceTs: number): number {
+  return (db.prepare('SELECT COUNT(*) AS c FROM publications WHERE channel = ? AND timestamp >= ?').get(channel, sinceTs) as { c: number }).c;
+}
+
+export function publicationHashExists(contentHash: string): boolean {
+  return !!db.prepare('SELECT 1 FROM publications WHERE content_hash = ? LIMIT 1').get(contentHash);
 }
 
 // === Trading positions ===

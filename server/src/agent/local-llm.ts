@@ -19,7 +19,7 @@ export type LocalCompletion = {
  *  real tool_calls entry. Left as text it does nothing and the model loops retrying forever, so
  *  rescue that shape into an executable call. Conservative on purpose: the whole (fence-stripped)
  *  text must parse as one JSON object with a known-looking name + object args. */
-function rescueTextToolCall(text: string, knownTools: Set<string>): { id: string; name: string; input: Record<string, unknown> } | null {
+export function rescueTextToolCall(text: string, knownTools: Set<string>): { id: string; name: string; input: Record<string, unknown> } | null {
   let candidate = text.trim();
   const fence = candidate.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
   if (fence) candidate = fence[1].trim();

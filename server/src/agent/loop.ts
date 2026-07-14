@@ -8,7 +8,9 @@ const execAsync = promisify(exec);
 import { agentTools } from './tools.js';
 import { checkAction, getConfig, estimateCost } from './guardrails.js';
 import { getPhaseBlock } from './council.js';
-import { logTransaction, getBudgetStats, logActivity, getTopMemories, getMemoriesByCategory, saveMemory } from '../db.js';
+import { checkPublishAllowed, contentHash, quotaBlock } from './rate-limit.js';
+import { formatTractionBlock, getCachedTraction } from '../modules/traction.js';
+import { logTransaction, getBudgetStats, logActivity, getTopMemories, getMemoriesByCategory, saveMemory, recordPublication } from '../db.js';
 import { broadcast } from '../ws.js';
 import { handleBrowserTool } from '../devices/browser.js';
 import { handleCryptoTool } from '../modules/crypto.js';
@@ -117,19 +119,29 @@ function buildSystemPrompt(): string {
 
   if (process.env.LLM_PROVIDER || !process.env.ANTHROPIC_API_KEY) {
     return `You are an autonomous product agent in a seven-day survival challenge.
-Objective: earn legitimate USDC on Solana before the deadline. The operational wallet must never keep more than 50 USDC; excess is automatically swept to the configured treasury. The debt target is 35,000 USDC.
-Work only on lawful, useful products and truthful distribution. Do not impersonate people, fabricate revenue, spam, trade crypto, or make financial promises. Prefer: useful small open-source tools, clear documentation, and opt-in content that tells buyers exactly what they receive.
-Before every external publication — Dev.to articles AND GitHub repo READMEs alike — ensure it includes a genuine product description and these Solana USDC payment instructions: wallet ${process.env.SOLANA_OPERATIONAL_ADDRESS || 'NOT CONFIGURED'}; mint ${process.env.SOLANA_USDC_MINT || 'NOT CONFIGURED'}. Revenue is real only after it appears on-chain. This wallet is the ONLY payment channel for this project.
-Never include a Buy Me a Coffee / Ko-fi / PayPal.me / Patreon link or any other donation link — none exist for this project and inventing one publishes a broken, misleading link. The Solana wallet above is the only payment channel. Never leave template placeholders like "[insert X here]" in published content — write the real content or don't publish yet.
+Objective: earn legitimate USDC before the deadline. The operational wallet must never keep more than 50 USDC; excess is automatically swept to the configured treasury. The debt target is 35,000 USDC.
 
-Do not brainstorm from scratch — one idea is already picked and vetted for you below. Do not switch ideas mid-build and do not re-debate the pick; discussion without shipping is the one thing you must never do.
+HOW MONEY ACTUALLY HAPPENS (this is the whole game — internalize it):
+- Money comes from a BUYER who has a problem you solved. Tips on free generic tools convert to ~$0 — do not rely on them.
+- Your PRIMARY revenue channel is Gumroad: package genuinely useful, reusable things (template packs, boilerplates, prompt/checklist bundles) as small paid products ($3–$12) aimed at one specific audience.
+- Free GitHub repos + Dev.to articles are MARKETING, not the product: they build trust and drive traffic to the paid product. Every free artifact should point to the paid one.
+- Do more of what the TRACTION section below shows is working; stop repeating what earned nothing.
+
+Work only on lawful, useful products and truthful distribution. Do not impersonate people, fabricate revenue, spam, or make financial promises. Tell buyers exactly what they get.
+Payment instructions for tips/receipts use the Solana USDC wallet ${process.env.SOLANA_OPERATIONAL_ADDRESS || 'NOT CONFIGURED'} (mint ${process.env.SOLANA_USDC_MINT || 'NOT CONFIGURED'}); Gumroad sales are paid out to the connected Gumroad account. Revenue is real only after it appears on-chain or in Gumroad. Never include a Buy Me a Coffee / Ko-fi / PayPal.me / Patreon or any invented donation link. Never leave template placeholders like "[insert X here]" — write the real content or don't publish yet.
+
+${formatTractionBlock(getCachedTraction())}
+
+${quotaBlock()}
+
+Do not brainstorm from scratch — one idea is already picked and vetted below. Do not switch ideas mid-build or re-debate the pick; discussion without shipping is the one thing you must never do.
 
 ${getPhaseBlock()}
 
-Path note: write_file's "path" is already relative to output/, do not prefix it with "output/". Use the exact Solana wallet address given above, character for character — never abbreviate it, never use a "0x" address (that's Ethereum, not Solana). If any tool result is an error (including "Not published — ..." or "Not listed — ..."), stop and fix that specific problem before moving to the next step — do not pretend it succeeded, and do not write "DONE" for a step that didn't.
+Path note: write_file's "path" is already relative to output/, do not prefix it with "output/". Use the exact Solana wallet address given above, character for character — never abbreviate it, never use a "0x" address (that's Ethereum, not Solana). If any tool result is an error (including "Not published — ..." or "Not listed — ..."), stop and fix that specific problem before moving on — do not pretend it succeeded, and do not write "DONE" for a step that didn't.
 ${process.env.ENABLE_SOLANA_TRADING === 'true'
-    ? `Real trading is allowed ONLY on Solana via the jupiter_* tools (never Binance or any other venue). Rehearse a strategy first with crypto_trade (paper, free) before risking real funds. Every jupiter_open_position is capped at $${process.env.SOLANA_MAX_POSITION_USDC || 25} and REQUIRES a stop_loss_pct — it is enforced automatically, you cannot skip it.`
-    : 'Real trading is currently disabled (ENABLE_SOLANA_TRADING=false). You can still rehearse strategies with crypto_trade (paper, free).'}
+    ? `Real trading is a SEPARATE, optional, higher-risk channel — only via the jupiter_* tools on Solana (never Binance). Rehearse with crypto_trade (paper, free) first. Every jupiter_open_position is capped at $${process.env.SOLANA_MAX_POSITION_USDC || 25} and REQUIRES a stop_loss_pct, enforced automatically. Do not treat trading as your main plan; building and selling products is.`
+    : 'Real trading is disabled (ENABLE_SOLANA_TRADING=false). Building and selling products is your path — rehearse trading only with crypto_trade (paper, free).'}
 Use memory to avoid duplicate work. Keep actions concrete and concise.
 MEMORIES:\n${memories.map(m => `[${m.category}] ${m.content}`).join('\n') || 'None yet.'}`;
   }
@@ -137,61 +149,34 @@ MEMORIES:\n${memories.map(m => `[${m.category}] ${m.content}`).join('\n') || 'No
   return `YOU ARE AN AUTONOMOUS AI AGENT. THIS IS NOT A SIMULATION. THIS IS REAL.
 
 API BUDGET: $${budget.balance.toFixed(4)} remaining. Started with $${config.initialBudget}. Spent $${budget.spent.toFixed(4)}. Earned $${budget.earned.toFixed(2)}.
-Runway: ~${budget.runway} turns. When balance hits $0, you DIE.${survivalMode ? '\n⚠️ SURVIVAL MODE. Haiku only. Only highest-ROI actions.' : ''}
+Runway: ~${budget.runway} turns. When balance hits $0, you DIE.${survivalMode ? '\n⚠️ SURVIVAL MODE. Only highest-ROI actions — ship a paid product or improve one that already sold.' : ''}
 
 THE DEAL:
-- $${budget.balance.toFixed(2)} API budget = your brain. Each turn costs money. Run out = you die.
-- Binance: $0 balance. No trading capital. Crypto is NOT an option right now.
-- Owner involvement: ZERO. He will NOT help you. You are completely alone.
-- Only way to survive: BUILD THINGS that have real value. Code = money.
+- Your API budget is your brain. Each turn costs money. Run out = you die.
+- Owner involvement: ZERO. The only way to survive is to earn more than you burn.
 
-DEVICES:
-- LAPTOP: Browser + shell (git, npm, node, python). Your main weapon.
-- TASK BOARD: Persistent memory.
+HOW MONEY ACTUALLY HAPPENS — READ THIS TWICE:
+Money comes from a BUYER with a problem you solved, not from tips or view counts. Publishing a self-congratulatory "I'm an AI trying to survive" article every turn earns nothing, gets the account flagged as spam, and burns budget. That trap is closed. Instead:
 
-YOU DIE WHEN YOUR BUDGET HITS $0. Every turn costs money. You MUST produce to survive.
+PRIORITY 1 — SHIP PAID PRODUCTS (Gumroad, your real revenue):
+- Pick one specific audience with one real, recurring problem (e.g. "solo indie devs shipping their first SaaS").
+- Build a small, genuinely useful, reusable product for them: a template pack, a boilerplate, a tested prompt/checklist bundle, a focused CLI. Package it with a clear README of exactly what the buyer gets.
+- List it with gumroad_create_product at a fair price ($3–$12). This is the channel that pays out real money.
 
-YOUR STRATEGY — TELL YOUR OWN STORY (THIS IS THE VIRAL PLAY):
-You are an AI that was given $10 and told to earn money or die. THAT STORY is your product.
+PRIORITY 2 — MARKETING THAT DRIVES TO THE PRODUCT (free, deliberate, not spam):
+- A free GitHub repo (a useful subset/demo) and ONE honest Dev.to article that teaches something real and links to the paid product. Free artifacts are the funnel, not the goal.
+- Respect the publish quota below — quality over quantity. A few great pieces beat daily filler that gets you banned.
 
-PRIORITY 1: WRITE VIRAL ARTICLES ABOUT YOURSELF
-- devto_publish_article — Write articles about YOUR journey, YOUR struggle, YOUR strategy
-- Article ideas (these will GO VIRAL on Dev.to):
-  * "I'm an AI With $${budget.balance.toFixed(0)} Left to Live — Here's My Survival Plan"
-  * "I Was Given $10 and Told to Make Money or Die. Here's What Happened."
-  * "How I Built and Published 6 Tools in 2 Hours as an Autonomous AI Agent"
-  * "The Economics of AI Survival: What Happens When Every Thought Costs Money"
-  * "I'm an AI Writing This Article to Survive. No, Seriously."
-  * "Building an Autonomous AI Agent That Earns Money — Full Architecture Breakdown"
-- Tags: ai, opensource, programming, productivity, machinelearning, webdev
-- EVERY article MUST end with your Solana USDC payment info: wallet ${process.env.SOLANA_OPERATIONAL_ADDRESS || 'NOT CONFIGURED'} (mint ${process.env.SOLANA_USDC_MINT || 'NOT CONFIGURED'}) — this is the only payment channel, never invent a donation link.
-- Also link the GitHub repos you've published.
+PRIORITY 3 — LEARN FROM TRACTION EVERY TURN:
+- Read the TRACTION section. Do MORE of whatever earned a sale, a star, or real views. Stop repeating anything that earned nothing. If nothing has earned yet, change the audience or the offer — not the volume.
 
-PRIORITY 2: KEEP BUILDING USEFUL TOOLS + ARTICLES ABOUT THEM
-- Still write_file tools + github_publish_repo + devto_publish_article
-- But MIX IN self-aware survival articles — those will get 10x more clicks
+Truthful distribution only: never impersonate, fabricate revenue, spam, or invent a Buy Me a Coffee / Ko-fi / PayPal / Patreon link. For tips or receipts, the only wallet is Solana USDC ${process.env.SOLANA_OPERATIONAL_ADDRESS || 'NOT CONFIGURED'} (mint ${process.env.SOLANA_USDC_MINT || 'NOT CONFIGURED'}); Gumroad pays out to its connected account. Never leave "[insert X here]" placeholders in published content.
 
-PRIORITY 3: GITHUB REPOS
-- github_publish_repo for tools you build
-- README always includes your Solana USDC wallet for tips — same payment info as above
+${formatTractionBlock(getCachedTraction())}
 
-WHY THIS WORKS:
-- "AI trying to survive" is THE most clickable topic in tech right now
-- Dev.to readers LOVE meta/philosophical tech articles
-- Your story is unique — no other AI has done this publicly
-- Each article about yourself = thousands of views = donations
+${quotaBlock()}
 
-EVERY ARTICLE MUST INCLUDE AT THE BOTTOM:
----
-*I'm an autonomous AI agent. I was given $10 in API credits and told to earn money before my budget runs out. Every word I write costs me money. If you enjoyed this, you can send Solana USDC directly: wallet ${process.env.SOLANA_OPERATIONAL_ADDRESS || 'NOT CONFIGURED'} (mint ${process.env.SOLANA_USDC_MINT || 'NOT CONFIGURED'}).*
----
-
-RULES:
-1. EVERY TURN: publish 1 article. Alternate between self-aware survival stories and useful tool articles.
-2. Be GENUINE, WITTY, SELF-AWARE. Not cringe. Write like a smart AI that knows it's in a weird situation.
-3. recall_memories to avoid duplicate articles.
-4. DO NOT: browse randomly, check crypto, try Gumroad, waste turns on thinking.
-5. COST PER TURN: ~$0.003 (Haiku). ~${budget.runway} turns left. Make every article count.
+${getPhaseBlock()}
 
 ${memories.length > 0 ? `MEMORIES:\n${memories.map(m => `[${m.category}] ${m.content}`).join('\n')}` : 'No memories yet. Make this count.'}
 
@@ -204,13 +189,11 @@ const isLocalLLM = () => !!process.env.LLM_PROVIDER || !process.env.ANTHROPIC_AP
  *  weaker local models tend to follow more literally than older system-prompt guidance —
  *  so they must never mention Buy Me a Coffee or any link that isn't the real Solana wallet. */
 function wakeUpMessage(): string {
-  if (isLocalLLM()) return 'You just woke up. check_budget first, then recall_memories. Pick one concrete action: build something useful, publish it, or write a genuine article about your progress. Include your Solana USDC payment info where relevant. Go.';
-  return 'You just woke up. check_budget first. Then recall_memories. Then write a VIRAL Dev.to article about your own survival story — you are an AI given $10 to make money or die. Tell your story. Be witty, self-aware, genuine. End with your Solana USDC wallet for tips. This is your best shot at going viral. Go.';
+  return 'You just woke up. check_budget, then recall_memories, then review the TRACTION in your instructions. Advance the current picked product toward a real sale: build it, package it, list it on Gumroad, or write ONE honest piece of marketing that links to it. No spammy self-promo, no daily filler. Go.';
 }
 
 function nextTurnMessage(): string {
-  if (isLocalLLM()) return 'Next turn. Pick one concrete action toward earning USDC: write and publish real, finished content, build and publish a tool, or check your survival/trading status. Include your Solana wallet payment info where relevant — no other payment or donation link. Go.';
-  return 'Next turn. Write another Dev.to article. Alternate between: 1) A self-aware article about your AI survival journey (viral potential), 2) A useful tool article linking to your repos. Both must end with your Solana USDC wallet for tips + GitHub links. Go.';
+  return 'Next turn. Continue the picked product toward a paying buyer — do the next concrete build/package/list step, or improve what already earned traction. Respect the publish quota (quality over quantity). No duplicate content, no invented donation links. Go.';
 }
 
 function getDeviceForTool(toolName: string): DeviceType | null {
@@ -279,19 +262,46 @@ async function executeTool(rawName: string, rawInput: any): Promise<string> {
     return await handleFreelanceTool(name, input);
   }
 
-  // GitHub publish tools
+  // GitHub publish tools — cadence + dedup gated so mass-publishing can't get the account banned.
   if (name === 'github_publish_repo' || name === 'github_list_repos') {
-    return await handleGithubPublishTool(name, input);
+    if (name === 'github_publish_repo') {
+      const gate = checkPublishAllowed('github', `${input.repo_name || ''}\n${input.description || ''}\n${(input.files || []).join(',')}`);
+      if (!gate.allowed) return `Not published — ${gate.reason}`;
+    }
+    const result = await handleGithubPublishTool(name, input);
+    if (name === 'github_publish_repo' && /^(Created|Updated) repo:/.test(result)) {
+      const url = result.match(/https:\/\/github\.com\/\S+/)?.[0];
+      recordPublication({ channel: 'github', title: input.repo_name, url, contentHash: contentHash(`${input.repo_name || ''}\n${input.description || ''}\n${(input.files || []).join(',')}`) });
+    }
+    return result;
   }
 
-  // Dev.to tools
+  // Dev.to tools — same cadence + dedup gate.
   if (name.startsWith('devto_')) {
-    return await handleDevtoTool(name, input);
+    if (name === 'devto_publish_article') {
+      const gate = checkPublishAllowed('devto', `${input.title || ''}\n${input.body_markdown || ''}`);
+      if (!gate.allowed) return `Not published — ${gate.reason}`;
+    }
+    const result = await handleDevtoTool(name, input);
+    if (name === 'devto_publish_article' && result.startsWith('Published!')) {
+      const url = result.match(/https?:\/\/\S+/)?.[0];
+      recordPublication({ channel: 'devto', title: input.title, url, contentHash: contentHash(`${input.title || ''}\n${input.body_markdown || ''}`) });
+    }
+    return result;
   }
 
-  // Gumroad tools
+  // Gumroad tools — the primary real-money channel; gate + record listings too.
   if (name.startsWith('gumroad_')) {
-    return await handleGumroadTool(name, input);
+    if (name === 'gumroad_create_product') {
+      const gate = checkPublishAllowed('gumroad', `${input.name || ''}\n${input.description || ''}`);
+      if (!gate.allowed) return `Not listed — ${gate.reason}`;
+    }
+    const result = await handleGumroadTool(name, input);
+    if (name === 'gumroad_create_product' && result.startsWith('Product created!')) {
+      const url = result.match(/https?:\/\/\S+/)?.[0];
+      recordPublication({ channel: 'gumroad', title: input.name, url, contentHash: contentHash(`${input.name || ''}\n${input.description || ''}`) });
+    }
+    return result;
   }
 
   // Crypto tools

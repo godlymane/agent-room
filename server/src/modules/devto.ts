@@ -24,6 +24,40 @@ async function devtoAPI(endpoint: string, method = 'GET', body?: any): Promise<a
   return data;
 }
 
+export interface DevtoStats {
+  configured: boolean;
+  count: number;
+  totalViews: number;
+  totalReactions: number;
+  top: Array<{ title: string; views: number; reactions: number; url: string }>;
+}
+
+/** Raw Dev.to metrics for the traction feedback loop. Never throws — returns configured:false
+ *  on missing key or API error so the agent's decision path degrades gracefully. */
+export async function fetchDevtoStats(): Promise<DevtoStats> {
+  const empty: DevtoStats = { configured: false, count: 0, totalViews: 0, totalReactions: 0, top: [] };
+  if (!process.env.DEVTO_API_KEY) return empty;
+  try {
+    const articles = await devtoAPI('/articles/me?per_page=50');
+    if (!Array.isArray(articles)) return { ...empty, configured: true };
+    const mapped = articles.map((a: any) => ({
+      title: a.title as string,
+      views: a.page_views_count || 0,
+      reactions: a.positive_reactions_count || 0,
+      url: a.url as string,
+    }));
+    return {
+      configured: true,
+      count: mapped.length,
+      totalViews: mapped.reduce((s, a) => s + a.views, 0),
+      totalReactions: mapped.reduce((s, a) => s + a.reactions, 0),
+      top: mapped.sort((a, b) => b.views - a.views).slice(0, 3),
+    };
+  } catch {
+    return { ...empty, configured: true };
+  }
+}
+
 export async function handleDevtoTool(name: string, input: any): Promise<string> {
   switch (name) {
     case 'devto_publish_article': {

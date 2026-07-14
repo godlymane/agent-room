@@ -9,6 +9,7 @@ import { getConfig, updateConfig } from './agent/guardrails.js';
 import { getBudgetStats, getRecentActivities } from './db.js';
 import { getSurvivalStatus, reconcileSolanaSurvival } from './modules/solana-survival.js';
 import { reconcileTradingPositions, listPositions } from './modules/solana-trading.js';
+import { refreshTraction } from './modules/traction.js';
 import type { WSMessage } from '../../shared/types.js';
 
 const app = express();
@@ -135,6 +136,13 @@ setInterval(() => { reconcileSolanaSurvival().catch(error => console.error('[SOL
 // so any already-open position stays protected.
 const TRADING_POLL_MS = Number(process.env.SOLANA_TRADING_POLL_MS || 60_000);
 setInterval(() => { reconcileTradingPositions().catch(error => console.error('[TRADING]', error.message)); }, TRADING_POLL_MS);
+
+// Refresh the traction snapshot (Dev.to/GitHub/Gumroad metrics) in the background so the agent's
+// system prompt always reads fresh outcomes without any turn blocking on network I/O. Kick one off
+// at boot, then on the module's own cadence.
+const TRACTION_REFRESH_MS = Number(process.env.TRACTION_REFRESH_MS || 15 * 60 * 1000);
+refreshTraction(true).catch(error => console.error('[TRACTION]', error.message));
+setInterval(() => { refreshTraction().catch(error => console.error('[TRACTION]', error.message)); }, TRACTION_REFRESH_MS);
 
 // Graceful shutdown: stop the loop mid-turn cleanly and release the headless browser — otherwise
 // every Ctrl+C leaks a Chromium process. (Open Solana positions are safe across restarts: they

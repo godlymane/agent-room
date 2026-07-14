@@ -46,6 +46,33 @@ export async function repoExists(owner: string, repo: string): Promise<boolean> 
   }
 }
 
+export interface GithubStats {
+  configured: boolean;
+  repoCount: number;
+  totalStars: number;
+  top: Array<{ name: string; stars: number; url: string }>;
+}
+
+/** Raw GitHub metrics for the traction feedback loop. Never throws. */
+export async function fetchGithubStats(): Promise<GithubStats> {
+  const empty: GithubStats = { configured: false, repoCount: 0, totalStars: 0, top: [] };
+  if (!process.env.GITHUB_TOKEN) return empty;
+  try {
+    const username = await getUsername();
+    const repos = await githubAPI(`/users/${username}/repos?sort=updated&per_page=50`);
+    if (!Array.isArray(repos)) return { ...empty, configured: true };
+    const mapped = repos.map((r: any) => ({ name: r.name as string, stars: r.stargazers_count || 0, url: r.html_url as string }));
+    return {
+      configured: true,
+      repoCount: mapped.length,
+      totalStars: mapped.reduce((s, r) => s + r.stars, 0),
+      top: mapped.sort((a, b) => b.stars - a.stars).slice(0, 3),
+    };
+  } catch {
+    return { ...empty, configured: true };
+  }
+}
+
 export async function handleGithubPublishTool(name: string, input: any): Promise<string> {
   switch (name) {
     case 'github_publish_repo': {

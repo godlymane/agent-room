@@ -15,12 +15,14 @@ export interface ProductIdea {
 }
 
 // Scoring heuristics an idea should satisfy before being picked — surfaced to the model so its
-// own judgment (e.g. when it proposes something outside this list) stays aligned.
+// own judgment (e.g. when it proposes something outside this list) stays aligned. Reordered around
+// one hard truth: tip-jars on free generic tools convert to ~$0. Real money needs a real buyer.
 export const PRINCIPLES = [
-  'Sell the tool, not the gold — ship something people use repeatedly, not a one-off answer.',
-  'Pick a niche, not a platform — one concrete problem for one concrete audience beats a general tool.',
-  'Open-source small utilities to earn traffic and trust before asking for money.',
-  'Package results as a product (repo + README + article), never leave loose, undocumented code.',
+  'Money comes from a BUYER with a problem, not from tips. A paid Gumroad product someone needs beats 100 free tools nobody asked for.',
+  'Pick a niche and an audience, not a platform — "regex helper for QA engineers" beats "a regex tool".',
+  'Sell the tool, not the gold — package a repeatable, reusable thing (template pack, boilerplate, checklist), not a one-off answer.',
+  'Free open-source is MARKETING, not the product: ship it to build trust/traffic, then convert with a paid upgrade.',
+  'Do more of what already earned (check TRACTION), stop repeating what earned nothing.',
   'Prefer international/English-language audiences — bigger reach, same effort.',
 ];
 
@@ -54,7 +56,12 @@ export function pickIdea(usedTitles: string[]): ProductIdea {
   const used = new Set(usedTitles.map(t => t.toLowerCase()));
   const remaining = IDEAS.filter(i => !used.has(i.title.toLowerCase()));
   const pool = remaining.length > 0 ? remaining : IDEAS;
-  return pool[Math.floor(Math.random() * pool.length)];
+  // Bias toward the paid channel: Gumroad is the only one that produces real money, so an unused
+  // paid product is always preferred over another free tool. Falls back to the general pool only
+  // once every paid idea has been shipped.
+  const paid = pool.filter(i => i.channel === 'gumroad');
+  const chooseFrom = paid.length > 0 ? paid : pool;
+  return chooseFrom[Math.floor(Math.random() * chooseFrom.length)];
 }
 
 export function principlesBlock(): string {
