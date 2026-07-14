@@ -59,11 +59,17 @@ export const agentTools: Anthropic.Tool[] = [
   { name: 'devto_list_articles', description: 'List your published Dev.to articles with view counts', input_schema: obj({}) },
 
   // === FILES ===
-  { name: 'write_file', description: 'Write/save a file', input_schema: obj({ path: str('File path (relative to output/)'), content: str('File content') }, ['path', 'content']) },
+  { name: 'write_file', description: 'Write/save a file', input_schema: obj({ path: str('File path, e.g. "README.md" or "tool/main.py" — already relative to the output folder, do NOT prefix it with "output/"'), content: str('File content') }, ['path', 'content']) },
   { name: 'read_file', description: 'Read a file', input_schema: obj({ path: str('File path') }, ['path']) },
 
   // === HUMAN ===
   { name: 'request_approval', description: 'Ask human for approval on something big', input_schema: obj({ action: str('What you want to do'), amount: num('Dollar amount (0 if none)'), reason: str('Why') }, ['action', 'reason']) },
+
+  // === GUMROAD (real digital-product sales, gated on the owner's own account token) ===
+  ...(process.env.GUMROAD_ACCESS_TOKEN ? [
+    { name: 'gumroad_create_product', description: 'List a digital product for sale on Gumroad (real money, paid out to the owner\'s connected Gumroad account). Price in cents. Use for packaged bundles (prompt packs, templates), not loose single files.', input_schema: obj({ name: str('Product name'), description: str('What the buyer gets'), price: num('Price in cents, e.g. 500 for $5') }, ['name', 'price']) } as Anthropic.Tool,
+    { name: 'gumroad_list_products', description: 'List your Gumroad products with sales counts and earnings', input_schema: obj({}) } as Anthropic.Tool,
+  ] : []),
 
   // === SOLANA TRADING (real money, Solana-only, gated) ===
   ...(process.env.ENABLE_SOLANA_TRADING === 'true' ? jupiterTools : []),

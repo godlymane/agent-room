@@ -3,7 +3,8 @@ import express from 'express';
 import cors from 'cors';
 import { createServer } from 'http';
 import { initWebSocket, onClientMessage, broadcast } from './ws.js';
-import { startLoop, stopLoop, isRunning, getAgentState } from './agent/loop.js';
+import { startLoop, stopLoop, isRunning, getAgentState, resolveApproval } from './agent/loop.js';
+import { closeBrowser } from './devices/browser.js';
 import { getConfig, updateConfig } from './agent/guardrails.js';
 import { getBudgetStats, getRecentActivities } from './db.js';
 import { getSurvivalStatus, reconcileSolanaSurvival } from './modules/solana-survival.js';
@@ -45,7 +46,7 @@ app.post('/api/survival/reconcile', requireAdmin, async (_req, res) => {
   catch (error: any) { res.status(400).json({ error: error.message }); }
 });
 
-app.get('/api/trading/positions', (_req, res) => res.json({ summary: listPositions() }));
+app.get('/api/trading/positions', requireAdmin, (_req, res) => res.json({ summary: listPositions() }));
 
 // Get recent activities
 app.get('/api/activities', (_req, res) => {
@@ -75,8 +76,27 @@ app.post('/api/config', requireAdmin, (req, res) => {
 });
 
 // === WebSocket Message Handling ===
+// 'command' can pause/resume/kill the agent or rewrite its guardrail config — same sensitivity
+// as the REST endpoints above, so it needs the same admin token, fail-closed if unconfigured.
 onClientMessage((msg: WSMessage) => {
+  // Approving can authorize real spending, so it's admin-gated exactly like 'command'.
+  if (msg.type === 'approval_response') {
+    const adminToken = process.env.ADMIN_API_TOKEN;
+    if (!adminToken || msg.data.token !== adminToken) {
+      console.warn('[WS] Rejected unauthorized approval_response');
+      return;
+    }
+    if (!resolveApproval(msg.data.id, msg.data.approved)) {
+      console.warn(`[WS] approval_response for unknown/expired request ${msg.data.id}`);
+    }
+    return;
+  }
   if (msg.type === 'command') {
+    const adminToken = process.env.ADMIN_API_TOKEN;
+    if (!adminToken || msg.data.token !== adminToken) {
+      console.warn(`[WS] Rejected unauthorized command: ${msg.data.action}`);
+      return;
+    }
     const { action, config: cfg } = msg.data;
     switch (action) {
       case 'pause':
@@ -115,3 +135,19 @@ setInterval(() => { reconcileSolanaSurvival().catch(error => console.error('[SOL
 // so any already-open position stays protected.
 const TRADING_POLL_MS = Number(process.env.SOLANA_TRADING_POLL_MS || 60_000);
 setInterval(() => { reconcileTradingPositions().catch(error => console.error('[TRADING]', error.message)); }, TRADING_POLL_MS);
+
+// Graceful shutdown: stop the loop mid-turn cleanly and release the headless browser — otherwise
+// every Ctrl+C leaks a Chromium process. (Open Solana positions are safe across restarts: they
+// live in SQLite and the stop-loss poller resumes from there on next boot.)
+let shuttingDown = false;
+function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log('\n[SERVER] Shutting down...');
+  stopLoop();
+  closeBrowser().catch(() => {});
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 3000).unref();
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

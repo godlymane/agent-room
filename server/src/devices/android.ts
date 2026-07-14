@@ -45,8 +45,9 @@ export async function handleAndroidTool(name: string, input: any): Promise<strin
     }
 
     case 'phone_type': {
-      // Escape special chars for adb
-      const escaped = input.text.replace(/ /g, '%s').replace(/'/g, "\\'");
+      // Whitelist before escaping: `input text "..."` runs inside the device shell, so a stray
+      // double quote, backtick or $() in LLM-provided text became arbitrary command execution there.
+      const escaped = input.text.replace(/[^\w\s.,!?@#:/\-]/g, '').replace(/ /g, '%s');
       shell(`input text "${escaped}"`);
       logActivity({ type: 'action', message: `Typed on phone: "${input.text.slice(0, 30)}"`, device: 'phone' });
       return `Typed: "${input.text}"`;

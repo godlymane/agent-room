@@ -45,6 +45,9 @@ export async function handleBrowserTool(name: string, input: any): Promise<strin
     const p = await ensureBrowser();
 
     if (name === 'browse_url') {
+      if (typeof input.url !== 'string' || !/^https?:\/\//i.test(input.url)) {
+        return 'Error: "url" must be a full http(s) URL, e.g. {"url": "https://example.com"}.';
+      }
       await p.goto(input.url, { waitUntil: 'domcontentloaded' });
       const title = await p.title();
       // Stream screenshot to frontend

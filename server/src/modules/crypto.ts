@@ -1,4 +1,4 @@
-import { logActivity, logTransaction } from '../db.js';
+import { logActivity, logTransaction, getSetting, setSetting } from '../db.js';
 
 // Paper trading state (in-memory, could persist to DB)
 interface Position {
@@ -22,11 +22,23 @@ interface PaperPortfolio {
   }>;
 }
 
-const portfolio: PaperPortfolio = {
-  balance: 1000, // Start with $1000 paper money
-  positions: [],
-  tradeHistory: [],
-};
+// Persisted in the config table: paper trading is the rehearsal space for real Solana trading,
+// so wiping the portfolio (and its P&L lessons) on every restart defeated its purpose.
+const portfolio: PaperPortfolio = (() => {
+  try {
+    const raw = getSetting('paper_portfolio');
+    if (raw) return JSON.parse(raw) as PaperPortfolio;
+  } catch { /* corrupt state — fall through to a fresh portfolio */ }
+  return {
+    balance: 1000, // Start with $1000 paper money
+    positions: [],
+    tradeHistory: [],
+  };
+})();
+
+function persistPortfolio() {
+  setSetting('paper_portfolio', JSON.stringify(portfolio));
+}
 
 // Fetch real market data from public APIs (no key needed)
 async function getPrice(symbol: string): Promise<{ price: number; change24h: number; volume: number } | null> {
@@ -106,6 +118,7 @@ export async function handleCryptoTool(name: string, input: any): Promise<string
           amount,
           timestamp: Date.now(),
         });
+        persistPortfolio();
         logActivity({ type: 'action', message: `Paper BUY ${symbol} $${amount} @ $${ticker.price}`, device: 'dashboard' });
         return `Paper BUY executed: ${symbol} $${amount} @ $${ticker.price}\nRemaining balance: $${portfolio.balance.toFixed(2)}`;
       } else {
@@ -121,6 +134,7 @@ export async function handleCryptoTool(name: string, input: any): Promise<string
           symbol, side: 'sell', amount: pos.amount, price: ticker.price, pnl, timestamp: Date.now(),
         });
         portfolio.positions.splice(posIdx, 1);
+        persistPortfolio();
 
         // If profit, log as earning
         if (pnl > 0) {

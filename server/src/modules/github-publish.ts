@@ -6,6 +6,7 @@ import { findPublishIssue } from './content-guard.js';
 
 const GITHUB_API = 'https://api.github.com';
 const OUTPUT_DIR = outputDir;
+const TEXT_FILE_PATTERN = /\.(md|txt|js|jsx|ts|tsx|py|json|ya?ml|html?|css|rst|cfg|ini|toml|sh)$/i;
 
 function getToken(): string {
   const token = process.env.GITHUB_TOKEN;
@@ -34,15 +35,36 @@ async function getUsername(): Promise<string> {
   return user.login;
 }
 
+/** Checks a github.com/owner/repo URL actually exists — used to stop articles from linking to
+ *  a repo that was never really published (invented URL, or a publish that silently failed). */
+export async function repoExists(owner: string, repo: string): Promise<boolean> {
+  try {
+    await githubAPI(`/repos/${owner}/${repo}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function handleGithubPublishTool(name: string, input: any): Promise<string> {
   switch (name) {
     case 'github_publish_repo': {
       const { repo_name, description, files } = input;
       if (!repo_name) return 'Error: repo_name required';
       if (!files || !Array.isArray(files) || files.length === 0) return 'Error: files array required (paths relative to output/)';
+      const realWallet = process.env.SOLANA_OPERATIONAL_ADDRESS;
       if (description) {
-        const issue = findPublishIssue(description);
+        const issue = findPublishIssue(description, realWallet);
         if (issue) return `Not published — ${issue}`;
+      }
+      // Scan actual file contents (READMEs etc.) before touching GitHub at all — the description
+      // alone isn't what gets published; checking only it let a fabricated link/placeholder in
+      // a pushed README slip through.
+      for (const filePath of files) {
+        const fullPath = path.join(OUTPUT_DIR, filePath);
+        if (!fs.existsSync(fullPath) || !TEXT_FILE_PATTERN.test(filePath)) continue;
+        const issue = findPublishIssue(fs.readFileSync(fullPath, 'utf-8'), realWallet);
+        if (issue) return `Not published — ${filePath}: ${issue}`;
       }
 
       try {

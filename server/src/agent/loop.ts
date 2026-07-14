@@ -1,7 +1,13 @@
-import { execSync } from 'child_process';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { v4 as uuid } from 'uuid';
+
+// Async on purpose: execSync froze the whole event loop for up to 30s per command, which also
+// froze the stop-loss poller — the one thing that must keep running while real positions are open.
+const execAsync = promisify(exec);
 import { agentTools } from './tools.js';
-import { checkAction, getConfig } from './guardrails.js';
+import { checkAction, getConfig, estimateCost } from './guardrails.js';
+import { getPhaseBlock } from './council.js';
 import { logTransaction, getBudgetStats, logActivity, getTopMemories, getMemoriesByCategory, saveMemory } from '../db.js';
 import { broadcast } from '../ws.js';
 import { handleBrowserTool } from '../devices/browser.js';
@@ -47,6 +53,12 @@ function toLocalHistory(messages: Anthropic.MessageParam[]): ChatMessage[] {
 }
 
 function getClient() {
+  // With an Anthropic key and no local-provider override, use the real API — previously this
+  // always fell through to the local wrapper, so ANTHROPIC_API_KEY setups silently called a
+  // (usually absent) localhost Ollama with the bogus model id 'local'.
+  if (!isLocalLLM()) {
+    return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  }
   return {
     messages: {
       create: async (request: any) => {
@@ -84,6 +96,19 @@ let running = false;
 let conversationHistory: Anthropic.MessageParam[] = [];
 const MAX_HISTORY = 40;
 
+// request_approval blocks its turn on one of these resolvers; index.ts routes the human's
+// (admin-token-verified) approval_response here. Without this wiring the APPROVE/DENY buttons
+// in the UI sent a message the server silently dropped.
+const pendingApprovals = new Map<string, (approved: boolean) => void>();
+
+export function resolveApproval(id: string, approved: boolean): boolean {
+  const resolver = pendingApprovals.get(id);
+  if (!resolver) return false;
+  pendingApprovals.delete(id);
+  resolver(approved);
+  return true;
+}
+
 function buildSystemPrompt(): string {
   const config = getConfig();
   const budget = getBudgetStats(config.initialBudget);
@@ -96,6 +121,12 @@ Objective: earn legitimate USDC on Solana before the deadline. The operational w
 Work only on lawful, useful products and truthful distribution. Do not impersonate people, fabricate revenue, spam, trade crypto, or make financial promises. Prefer: useful small open-source tools, clear documentation, and opt-in content that tells buyers exactly what they receive.
 Before every external publication — Dev.to articles AND GitHub repo READMEs alike — ensure it includes a genuine product description and these Solana USDC payment instructions: wallet ${process.env.SOLANA_OPERATIONAL_ADDRESS || 'NOT CONFIGURED'}; mint ${process.env.SOLANA_USDC_MINT || 'NOT CONFIGURED'}. Revenue is real only after it appears on-chain. This wallet is the ONLY payment channel for this project.
 Never include a Buy Me a Coffee / Ko-fi / PayPal.me / Patreon link or any other donation link — none exist for this project and inventing one publishes a broken, misleading link. The Solana wallet above is the only payment channel. Never leave template placeholders like "[insert X here]" in published content — write the real content or don't publish yet.
+
+Do not brainstorm from scratch — one idea is already picked and vetted for you below. Do not switch ideas mid-build and do not re-debate the pick; discussion without shipping is the one thing you must never do.
+
+${getPhaseBlock()}
+
+Path note: write_file's "path" is already relative to output/, do not prefix it with "output/". Use the exact Solana wallet address given above, character for character — never abbreviate it, never use a "0x" address (that's Ethereum, not Solana). If any tool result is an error (including "Not published — ..." or "Not listed — ..."), stop and fix that specific problem before moving to the next step — do not pretend it succeeded, and do not write "DONE" for a step that didn't.
 ${process.env.ENABLE_SOLANA_TRADING === 'true'
     ? `Real trading is allowed ONLY on Solana via the jupiter_* tools (never Binance or any other venue). Rehearse a strategy first with crypto_trade (paper, free) before risking real funds. Every jupiter_open_position is capped at $${process.env.SOLANA_MAX_POSITION_USDC || 25} and REQUIRES a stop_loss_pct — it is enforced automatically, you cannot skip it.`
     : 'Real trading is currently disabled (ENABLE_SOLANA_TRADING=false). You can still rehearse strategies with crypto_trade (paper, free).'}
@@ -204,8 +235,40 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   publish_content: 'create_content',
 };
 
-async function executeTool(rawName: string, input: any): Promise<string> {
+// Weak local models frequently put the right value under the wrong key — they blur tools together
+// (e.g. write_file gets devto's `body_markdown`, or a `filename` instead of `path`). Rather than
+// bounce each variant back and let the model loop, remap the well-known aliases to the real field
+// the handler expects. Only fills a canonical field when it's actually missing, so a correct call
+// is never disturbed.
+function normalizeToolInput(name: string, input: any): any {
+  if (!input || typeof input !== 'object') return input;
+  const out = { ...input };
+  const alias = (canonical: string, keys: string[]) => {
+    if (out[canonical] !== undefined && out[canonical] !== null) return;
+    for (const key of keys) {
+      if (out[key] !== undefined && out[key] !== null) { out[canonical] = out[key]; return; }
+    }
+  };
+  if (name === 'write_file') {
+    alias('content', ['body_markdown', 'body', 'text', 'data', 'file_content', 'contents']);
+    alias('path', ['filename', 'file', 'file_path', 'filepath', 'name']);
+  }
+  if (name === 'devto_publish_article') {
+    alias('body_markdown', ['content', 'body', 'markdown', 'text']);
+    alias('title', ['topic', 'headline']);
+  }
+  if (name === 'create_content') {
+    alias('topic', ['title', 'subject']);
+  }
+  if (name === 'save_memory') {
+    alias('content', ['text', 'memory', 'note']);
+  }
+  return out;
+}
+
+async function executeTool(rawName: string, rawInput: any): Promise<string> {
   const name = TOOL_NAME_ALIASES[rawName] || rawName;
+  const input = normalizeToolInput(name, rawInput);
   // Phone tools
   if (name.startsWith('phone_')) {
     return await handleAndroidTool(name, input);
@@ -247,11 +310,13 @@ async function executeTool(rawName: string, input: any): Promise<string> {
   }
 
   switch (name) {
-    case 'think':
-      agentState.thought = input.reasoning;
+    case 'think': {
+      const reasoning = typeof input.reasoning === 'string' ? input.reasoning : '';
+      agentState.thought = reasoning;
       broadcast({ type: 'state_update', data: { ...agentState } });
-      logActivity({ type: 'thought', message: input.reasoning });
+      if (reasoning) logActivity({ type: 'thought', message: reasoning });
       return 'OK';
+    }
 
     case 'check_budget': {
       const config = getConfig();
@@ -259,7 +324,13 @@ async function executeTool(rawName: string, input: any): Promise<string> {
     }
 
     case 'save_memory': {
-      saveMemory({ category: input.category, content: input.content, importance: input.importance });
+      if (typeof input.content !== 'string' || !input.content.trim()) {
+        return 'Error: "content" (what to remember) is required as a string.';
+      }
+      const validCategories = ['strategy', 'lesson', 'contact', 'opportunity', 'failure'];
+      const category = validCategories.includes(input.category) ? input.category : 'strategy';
+      const importance = Number.isFinite(input.importance) ? input.importance : 5;
+      saveMemory({ category, content: input.content, importance });
       logActivity({ type: 'strategy', message: `Memory: ${input.content.slice(0, 80)}`, device: 'taskboard' });
       return 'Saved';
     }
@@ -275,55 +346,108 @@ async function executeTool(rawName: string, input: any): Promise<string> {
 
     case 'create_content':
       logActivity({ type: 'action', message: `Creating ${input.type}: "${input.topic}"`, device: 'laptop' });
-      return `Generate the actual content now and use write_file to save it. Then figure out where to sell/post it.`;
+      return `Now CALL the write_file tool (a real tool call, not text) with exactly two fields: {"path": "<filename>.md", "content": "<the full finished ${input.type}>"}. Do not call create_content again for this ${input.type}.`;
 
-    case 'write_code':
-      logActivity({ type: 'action', message: `Coding: ${input.task.slice(0, 60)}`, device: 'laptop' });
-      return `Write the actual code in your response, then use write_file to save it.`;
+    case 'write_code': {
+      const task = typeof input.task === 'string' ? input.task : (typeof input.requirements === 'string' ? input.requirements : '');
+      logActivity({ type: 'action', message: `Coding: ${task.slice(0, 60) || '(unspecified)'}`, device: 'laptop' });
+      return `Write the actual code in your response, then CALL write_file with {"path": "...", "content": "..."} to save it.`;
+    }
 
     case 'run_command': {
       if (process.env.ENABLE_SHELL_TOOL !== 'true') return 'Shell tool disabled. Use write_file or enable it explicitly in server/.env.';
+      if (typeof input.command !== 'string' || !input.command.trim()) return 'Error: "command" (a shell command string) is required.';
       try {
-        const result = execSync(input.command, {
+        const { stdout } = await execAsync(input.command, {
           encoding: 'utf-8',
           timeout: 30000,
           cwd: workspaceDir,
+          maxBuffer: 1024 * 1024,
         });
         logActivity({ type: 'action', message: `$ ${input.command.slice(0, 60)}`, device: 'laptop' });
-        return result.slice(0, 3000);
+        return (stdout || '(no output)').slice(0, 3000);
       } catch (e: any) {
-        return `Command error: ${e.stderr?.slice(0, 500) || e.message}`;
+        return `Command error: ${(e.stderr || e.message || String(e)).toString().slice(0, 500)}`;
       }
     }
 
     case 'write_file': {
+      // Content is the one field we can't fabricate — without it there's nothing to save.
+      if (typeof input.content !== 'string' || input.content.length === 0) {
+        return 'Error: "content" (a non-empty string with the full file contents) is required. Call write_file with {"path": "README.md", "content": "..."}.';
+      }
+      // Path, however, we CAN derive. Weak models routinely omit it and then loop forever on the
+      // error; instead default to a slug of any title/topic they gave, or a timestamped draft, so
+      // the write always succeeds and the turn moves on. The returned message states the path used.
+      if (typeof input.path !== 'string' || !input.path.trim()) {
+        const hint = input.title || input.topic || input.name;
+        const slug = typeof hint === 'string' && hint.trim()
+          ? hint.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50)
+          : '';
+        input.path = slug ? `${slug}.md` : `draft-${Date.now()}.md`;
+      }
       const dir = outputDir;
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      const safePath = input.path.replace(/\.\./g, '').replace(/^\//, '');
-      const fullPath = `${dir}/${safePath}`;
-      const parentDir = fullPath.substring(0, fullPath.lastIndexOf('/'));
-      if (parentDir && !fs.existsSync(parentDir)) fs.mkdirSync(parentDir, { recursive: true });
+      // `path` is already relative to outputDir, but weaker models often redundantly prefix
+      // "output/" themselves (mirroring the tool description's wording) — strip it so files don't
+      // end up nested at output/output/... instead of output/...
+      const safePath = input.path.replace(/\.\./g, '').replace(/^\//, '').replace(/^output[\\/]/i, '');
+      const fullPath = path.resolve(dir, safePath);
+      // Containment is enforced on the RESOLVED path, not the sanitized string — string scrubbing
+      // alone still let absolute Windows paths ("C:\...") escape the output directory.
+      if (fullPath !== path.resolve(dir) && !fullPath.startsWith(path.resolve(dir) + path.sep)) {
+        return 'Error: write_file only writes inside the output/ directory. Use a relative path like "tool/main.py".';
+      }
+      const parentDir = path.dirname(fullPath);
+      if (!fs.existsSync(parentDir)) fs.mkdirSync(parentDir, { recursive: true });
       fs.writeFileSync(fullPath, input.content);
       logActivity({ type: 'action', message: `Wrote: ${safePath}`, device: 'laptop' });
       return `Saved: ${fullPath}`;
     }
 
     case 'read_file': {
+      // Confined to output/ and workspace/: an unconstrained read let the model open server/.env
+      // (wallet secret key, API tokens) and nothing downstream would stop it from publishing them.
+      if (typeof input.path !== 'string' || !input.path.trim()) {
+        return 'Error: "path" is required, e.g. {"path": "README.md"}.';
+      }
       try {
-        return fs.readFileSync(input.path, 'utf-8').slice(0, 5000);
+        const requested = path.isAbsolute(input.path) ? input.path : path.join(outputDir, input.path);
+        const resolved = path.resolve(requested);
+        const allowedRoots = [path.resolve(outputDir), path.resolve(workspaceDir)];
+        if (!allowedRoots.some(root => resolved === root || resolved.startsWith(root + path.sep))) {
+          return 'Error: read_file is confined to the output/ and workspace/ directories.';
+        }
+        return fs.readFileSync(resolved, 'utf-8').slice(0, 5000);
       } catch (e: any) {
         return `Error: ${e.message}`;
       }
     }
 
     case 'request_approval': {
+      const action = typeof input.action === 'string' && input.action.trim() ? input.action : 'unspecified action';
+      const reason = typeof input.reason === 'string' ? input.reason : '';
+      const amount = Number.isFinite(input.amount) ? input.amount : 0;
       const reqId = uuid();
       broadcast({
         type: 'approval_request',
-        data: { id: reqId, action: input.action, amount: input.amount || 0, reason: input.reason, module: 'agent' },
+        data: { id: reqId, action, amount, reason, module: 'agent' },
       });
-      logActivity({ type: 'approval_needed', message: `Needs approval: ${input.action}` });
-      return `Approval request sent. Waiting...`;
+      logActivity({ type: 'approval_needed', message: `Needs approval: ${action}` });
+      const previousStatus = agentState.status;
+      agentState.status = 'waiting_approval';
+      broadcast({ type: 'state_update', data: { ...agentState } });
+      const timeoutMs = Number(process.env.APPROVAL_TIMEOUT_MS || 300_000);
+      const approved = await new Promise<boolean | null>(resolve => {
+        pendingApprovals.set(reqId, resolve);
+        setTimeout(() => {
+          if (pendingApprovals.delete(reqId)) resolve(null);
+        }, timeoutMs);
+      });
+      agentState.status = previousStatus;
+      broadcast({ type: 'state_update', data: { ...agentState } });
+      if (approved === null) return `No human response within ${Math.round(timeoutMs / 1000)}s — treat this as DENIED and choose a smaller or safer action instead.`;
+      return approved ? 'APPROVED by human. Proceed with the action.' : 'DENIED by human. Do not do this — pick an alternative.';
     }
 
     default:
@@ -351,7 +475,10 @@ async function runOneIteration(): Promise<void> {
 
   // Pick model — use sonnet for important, haiku for routine
   const model = (process.env.LLM_LABEL === 'opus' ? 'opus' : 'haiku') as 'opus' | 'haiku'; // UI compatibility.
-  const modelId = process.env.LLM_MODEL || 'local';
+  // 'opus' label maps to Sonnet on purpose — see guardrails.estimateCost, the pricing matches.
+  const modelId = isLocalLLM()
+    ? (process.env.LLM_MODEL || 'local')
+    : (model === 'opus' ? 'claude-sonnet-5' : 'claude-haiku-4-5-20251001');
 
   agentState.status = 'thinking';
   agentState.currentTask = `${model === 'opus' ? '🧠 Sonnet' : '⚡ Haiku'} thinking...`;
@@ -390,8 +517,9 @@ async function runOneIteration(): Promise<void> {
       messages: conversationHistory,
     });
 
-    // Track cost
-    const cost = 0; // Ollama/Hermes inference is local or accounted for by its own provider.
+    // Track cost — local inference is free; real API calls burn the budget (that's the whole
+    // death mechanic, which "cost = 0 always" had quietly disabled).
+    const cost = isLocalLLM() ? 0 : estimateCost(model, response.usage.input_tokens, response.usage.output_tokens);
     logTransaction({ type: 'api_cost', amount: cost, description: `${model} (${response.usage.input_tokens}in/${response.usage.output_tokens}out)`, module: 'agent', model });
     broadcast({ type: 'budget_update', data: getBudgetStats(config.initialBudget) });
 
@@ -428,7 +556,16 @@ async function runOneIteration(): Promise<void> {
           broadcast({ type: 'state_update', data: { ...agentState } });
         }
 
-        const result = await executeTool(block.name, block.input);
+        // Must never throw past this point: the assistant message with this tool_use was already
+        // pushed to conversationHistory above, so every tool_use needs a matching tool_result or
+        // the next API call sends a dangling tool_use the local model's history reset doesn't catch.
+        let result: string;
+        try {
+          result = await executeTool(block.name, block.input);
+        } catch (error: any) {
+          result = `Error: ${error.message}`;
+          logActivity({ type: 'error', message: `${block.name} failed: ${error.message}`, device: device || undefined });
+        }
         toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result });
 
         logActivity({

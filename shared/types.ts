@@ -75,8 +75,8 @@ export type WSMessage =
   | { type: 'activity'; data: Activity }
   | { type: 'budget_update'; data: Budget }
   | { type: 'approval_request'; data: ApprovalRequest }
-  | { type: 'approval_response'; data: { id: string; approved: boolean } }
-  | { type: 'command'; data: { action: 'pause' | 'resume' | 'kill' | 'set_config'; config?: Partial<AgentConfig> } };
+  | { type: 'approval_response'; data: { id: string; approved: boolean; token?: string } }
+  | { type: 'command'; data: { action: 'pause' | 'resume' | 'kill' | 'set_config'; config?: Partial<AgentConfig>; token?: string } };
 
 export interface ApprovalRequest {
   id: string;

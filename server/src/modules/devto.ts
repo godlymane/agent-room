@@ -1,5 +1,6 @@
 import { logActivity } from '../db.js';
 import { findPublishIssue } from './content-guard.js';
+import { repoExists } from './github-publish.js';
 
 const DEVTO_API = 'https://dev.to/api';
 
@@ -28,8 +29,18 @@ export async function handleDevtoTool(name: string, input: any): Promise<string>
     case 'devto_publish_article': {
       const { title, body_markdown, tags, series } = input;
       if (!title || !body_markdown) return 'Error: title and body_markdown required';
-      const issue = findPublishIssue(`${title}\n${body_markdown}`);
+      const issue = findPublishIssue(`${title}\n${body_markdown}`, process.env.SOLANA_OPERATIONAL_ADDRESS);
       if (issue) return `Not published — ${issue}`;
+
+      // Any github.com/owner/repo link in the article must be a repo that's actually there —
+      // otherwise this is a fabricated or failed-but-claimed-successful publish, same class of
+      // problem as a fake donation link, just pointing at GitHub instead.
+      const repoLinks = [...body_markdown.matchAll(/github\.com\/([\w.-]+)\/([\w.-]+)/g)];
+      for (const [, owner, repo] of repoLinks) {
+        if (!(await repoExists(owner, repo.replace(/\.git$/, '')))) {
+          return `Not published — links to https://github.com/${owner}/${repo}, but that repo doesn't exist. Only link to a repo you already published with github_publish_repo, using the exact URL it returned.`;
+        }
+      }
 
       try {
         const article = await devtoAPI('/articles', 'POST', {
