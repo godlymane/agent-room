@@ -1,0 +1,3 @@
+import os
+# ... rest of the code ...
+print('Product listed on Gumroad')

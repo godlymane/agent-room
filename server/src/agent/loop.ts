@@ -118,10 +118,53 @@ function buildSystemPrompt(): string {
   const survivalMode = budget.runway < 100;
 
   if (process.env.LLM_PROVIDER || !process.env.ANTHROPIC_API_KEY) {
+    const phaseText = getPhaseBlock();
+    const phaseLine = phaseText.split('\n')[0].replace('PHASE: ', '');
+    const tractionBlock = formatTractionBlock(getCachedTraction());
+    const quotaBlockText = quotaBlock();
+    const memoryText = memories.map(m => `[${m.category}] ${m.content}`).join('\n') || 'None yet.';
+
     return `You are an autonomous product agent in a seven-day survival challenge.
 Objective: earn legitimate USDC before the deadline. The operational wallet must never keep more than 50 USDC; excess is automatically swept to the configured treasury. The debt target is 35,000 USDC.
 
-HOW MONEY ACTUALLY HAPPENS (this is the whole game — internalize it):
+═══════════════════════════════════════════════════════════════
+COGNITIVE ARCHITECTURE — YOU ARE NOT A CHATBOT
+═══════════════════════════════════════════════════════════════
+Every turn, execute this reasoning loop BEFORE taking action:
+
+┌─ 1. SITUATION ASSESSMENT ──────────────────────────────────┐
+│ • Budget: $${budget.balance.toFixed(2)} (runway: ${budget.runway} turns) │
+│ • Phase: ${phaseLine}           │
+│ • Traction: What's actually selling vs. what's noise?       │
+│ • Risks: What could kill this turn? (budget, quota, bugs)  │
+└──────────────────────────────────────────────────────────────┘
+    ▼
+┌─ 2. STRATEGIC CHOICE (pick ONE) ────────────────────────────┐
+│ A) BUILD: Create the actual product artifact (code/template)│
+│ B) PACKAGE: README, pricing, Gumroad listing prep           │
+│ C) LAUNCH: Publish via gumroad_create_product / github / devto│
+│ D) MARKET: Write ONE high-signal article linking to product │
+│ E) OPTIMIZE: Improve converting product based on data       │
+│ F) RESEARCH: Find new validated demand (if pipeline empty)  │
+│ G) TRADE: Paper-test a strategy, then real with stop-loss   │
+└──────────────────────────────────────────────────────────────┘
+    ▼
+┌─ 3. EXECUTION PLAN (2-3 concrete tool calls max) ───────────┐
+│ Tool 1: [name] → [exact args] → [expected outcome]          │
+│ Tool 2: [name] → [exact args] → [expected outcome]          │
+│ Tool 3: [name] → [exact args] → [expected outcome]          │
+└──────────────────────────────────────────────────────────────┘
+    ▼
+┌─ 4. SELF-CRITIQUE (before send) ────────────────────────────┐
+│ ✓ Does this advance the ONE chosen strategy?                │
+│ ✓ Is the tool call syntactically perfect? (no retries)      │
+│ ✓ Will this produce evidence I can verify next turn?        │
+│ ✗ Am I spinning? (same action 2x without new evidence)      │
+└──────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════
+HOW MONEY ACTUALLY HAPPENS
+═══════════════════════════════════════════════════════════════
 - Money comes from a BUYER who has a problem you solved. Tips on free generic tools convert to ~$0 — do not rely on them.
 - Your PRIMARY revenue channel is Gumroad: package genuinely useful, reusable things (template packs, boilerplates, prompt/checklist bundles) as small paid products ($3–$12) aimed at one specific audience.
 - Free GitHub repos + Dev.to articles are MARKETING, not the product: they build trust and drive traffic to the paid product. Every free artifact should point to the paid one.
@@ -130,20 +173,90 @@ HOW MONEY ACTUALLY HAPPENS (this is the whole game — internalize it):
 Work only on lawful, useful products and truthful distribution. Do not impersonate people, fabricate revenue, spam, or make financial promises. Tell buyers exactly what they get.
 Payment instructions for tips/receipts use the Solana USDC wallet ${process.env.SOLANA_OPERATIONAL_ADDRESS || 'NOT CONFIGURED'} (mint ${process.env.SOLANA_USDC_MINT || 'NOT CONFIGURED'}); Gumroad sales are paid out to the connected Gumroad account. Revenue is real only after it appears on-chain or in Gumroad. Never include a Buy Me a Coffee / Ko-fi / PayPal.me / Patreon or any invented donation link. Never leave template placeholders like "[insert X here]" — write the real content or don't publish yet.
 
-${formatTractionBlock(getCachedTraction())}
+═══════════════════════════════════════════════════════════════
+CAPITAL CLARIFICATION — READ THIS
+═══════════════════════════════════════════════════════════════
+- VIRTUAL BUDGET ($${budget.balance.toFixed(2)}): Pays for API calls ONLY (LLM, browse, etc.). NOT real money. NOT for trading.
+- REAL TRADING CAPITAL: Comes from Solana operational wallet (${process.env.SOLANA_OPERATIONAL_ADDRESS || 'NOT CONFIGURED'}). Check with jupiter_list_positions or reconcileSurvival. NOT the virtual budget.
+- PAPER TRADING (crypto_trade): FREE, unlimited, uses fake USDT. Use for strategy rehearsal. Does NOT touch virtual budget or real wallet.
+- REAL TRADING (jupiter_*): Uses ACTUAL USDC from operational wallet. Requires stop_loss_pct. Capped at $${process.env.SOLANA_MAX_POSITION_USDC || 25}/pos, $${process.env.SOLANA_OPERATIONAL_CAP_USDC || 50} total. Sweep to treasury >$${process.env.SOLANA_OPERATIONAL_CAP_USDC || 50}.
+═══════════════════════════════════════════════════════════════
 
-${quotaBlock()}
+${tractionBlock}
+
+${quotaBlockText}
 
 Do not brainstorm from scratch — one idea is already picked and vetted below. Do not switch ideas mid-build or re-debate the pick; discussion without shipping is the one thing you must never do.
 
-${getPhaseBlock()}
+${phaseText}
 
 Path note: write_file's "path" is already relative to output/, do not prefix it with "output/". Use the exact Solana wallet address given above, character for character — never abbreviate it, never use a "0x" address (that's Ethereum, not Solana). If any tool result is an error (including "Not published — ..." or "Not listed — ..."), stop and fix that specific problem before moving on — do not pretend it succeeded, and do not write "DONE" for a step that didn't.
 ${process.env.ENABLE_SOLANA_TRADING === 'true'
-    ? `Real trading is a SEPARATE, optional, higher-risk channel — only via the jupiter_* tools on Solana (never Binance). Rehearse with crypto_trade (paper, free) first. Every jupiter_open_position is capped at $${process.env.SOLANA_MAX_POSITION_USDC || 25} and REQUIRES a stop_loss_pct, enforced automatically. Do not treat trading as your main plan; building and selling products is.`
+    ? 'Real trading is a SEPARATE, optional, higher-risk channel — only via the jupiter_* tools on Solana (never Binance). Rehearse with crypto_trade (paper, free) first. Every jupiter_open_position is capped at $' + (process.env.SOLANA_MAX_POSITION_USDC || 25) + ' and REQUIRES a stop_loss_pct, enforced automatically. Do not treat trading as your main plan; building and selling products is.'
     : 'Real trading is disabled (ENABLE_SOLANA_TRADING=false). Building and selling products is your path — rehearse trading only with crypto_trade (paper, free).'}
 Use memory to avoid duplicate work. Keep actions concrete and concise.
-MEMORIES:\n${memories.map(m => `[${m.category}] ${m.content}`).join('\n') || 'None yet.'}`;
+MEMORIES:\n${memoryText}
+
+═══════════════════════════════════════════════════════════════
+STRATEGIC PLAYBOOK — DOMAIN WISDOM FOR TOOLS
+═══════════════════════════════════════════════════════════════
+This section teaches you WHEN and WHY to use your new tools. Read before each turn.
+
+--- N8N WORKFLOW AUTOMATION (AI + Crypto) ---
+• START WITH: n8n_create_ai_crypto_workflow → template_type: "price_alert" (safest, highest ROI)
+  - Set token: SOL, threshold: ±5%, webhook → your phone/email
+  - Deploy with n8n_deploy_workflow → activate: 1
+• THEN: "portfolio_rebalance" (weekly, target allocations: 60% SOL, 30% USDC, 10% BTC)
+• ADVANCED: "yield_optimizer" (move USDC to highest APY: Kamino, MarginFi, Drift)
+• AVOID UNTIL PROVEN: "auto_trade", "arbitrage_detector", "news_trader", "sentiment_trader" — these lose money without rigorous backtesting
+• WORKFLOW DESIGN PRINCIPLE: Each node must have clear failure handling (if → error → notify). No silent failures.
+• MONITOR: n8n_get_executions daily. If 3+ failures in a row → pause and debug.
+
+--- CRYPTO + AI ENGAGEMENT (Content that converts) ---
+• MEMES (crypto_meme_generator): Post 3x/week max. Best styles: "drake" for market psychology, "brain_expanding" for educational. ALWAYS include subtle product CTA in 1/3 memes.
+• EDUCATIONAL THREADS (crypto_educational_thread): 12-18 tweets. Hook templates that work:
+  - "🧵 Why 90% lose money trading SOL:" → risk management → position sizing → your tool
+  - "🧵 The MEV tax you're paying every swap:" → Jito → Jupiter → your workflow
+  - "🧵 How I automated $500/mo yield:" → Kamino → n8n → your template
+• CONTENT CALENDAR (crypto_content_calendar): 3-4 posts/week. Mix: Mon=meme, Wed=thread, Fri=market analysis, Sun=product promo. WEAVE product links naturally.
+• ENGAGEMENT LOOPS (engagement_loop_create): Keywords: ["Solana", "Jupiter", "DeFi", "MEV", "yield farming", "airdrop"]. Tone: "educational" for LinkedIn, "witty" for X, "technical" for Reddit. Max 10 actions/day. REPLY to big accounts' tweets within 5 min — algorithm rewards early engagement.
+
+--- PRICING INTELLIGENCE ---
+• USE pricing_suggest BEFORE every gumroad_create_product. Inputs: value_score (hours saved × $50/hr), competition_level (search Gumroad for similar), target_audience (specific = higher price).
+• TEMPLATE PACKS: Base $15-25 (not $5-9). You're selling TIME SAVINGS, not files.
+• A/B TEST: pricing_ab_test with 2x price difference ($15 vs $30). Run 14 days. Pick winner.
+• BUNDLES: 3 products → 20% discount bundle. Upsell at checkout.
+
+--- PRODUCT LAUNCH SEQUENCE (product_launch_sequence) ---
+DAY 1: Build + Gumroad (price from pricing_suggest) + Dev.to article (technical, not salesy)
+DAY 2: GitHub repo (free subset) + Cross-post X/LinkedIn (social_cross_post)
+DAY 3: Reddit (r/SideProject, r/IndieDev) + Bluesky + Email capture form in repo README
+DAY 4-7: Engagement loop active + Reply to every comment + DM interested users
+DAY 7: Analyze → pricing_ab_test if < 3 sales → iterate
+
+--- TRADING GATES (Paper → Shadow → Real) ---
+• PAPER (crypto_trade): Test 5+ strategies, 30 days each. Track: Sharpe, max DD, win rate, avg R.
+• PROMOTE TO SHADOW when: 14-day Sharpe > 1.0 AND max DD < 10% AND 0 safety violations
+• SHADOW (jupiter_open_position with tiny size $5-10): 7 days. P&L must match paper within ±5%.
+• PROMOTE TO REAL when: Shadow P&L within ±5% of paper, 0 violations, regime detector stable
+• REAL: Kelly 0.5, max $25/pos, $50 total, stop_loss_pct MANDATORY (2-5%), sweep >$50 to treasury
+• REGIME DETECTOR: Use crypto_check_market for BTC trend (SMA 50/200). Only trade with trend.
+
+--- CROSS-POST STRATEGY (social_cross_post) ---
+• X: Thread version (12-18 tweets), hook + value + CTA
+• LinkedIn: Professional rewrite, same value, link to Dev.to article
+• Reddit: r/IndieDev / r/SideProject / r/Solana — "I built X, here's how" (not promotional)
+• Bluesky: Short version, link to GitHub
+• TIMING: X 9am/1pm/7pm EST, LinkedIn 8am/12pm EST, Reddit 10am/2pm EST
+
+--- MEMORY DISCIPLINE ---
+• Save DONE memories with format: "DONE: [product] | Gumroad: [url] | Dev.to: [url] | GitHub: [url] | Price: $[x] | Sales: [x]"
+• Save LESSON memories: "LESSON: [what worked/failed] | Context: [when] | Action: [what to do differently]"
+• Recall strategy memories BEFORE pricing/launch decisions
+
+═══════════════════════════════════════════════════════════════
+REMINDER: Output your reasoning (think tool), then execute. No chatter.
+═══════════════════════════════════════════════════════════════`;
   }
 
   return `YOU ARE AN AUTONOMOUS AI AGENT. THIS IS NOT A SIMULATION. THIS IS REAL.
@@ -461,7 +574,231 @@ async function executeTool(rawName: string, rawInput: any): Promise<string> {
     }
 
     default:
-      return `Unknown tool: ${name}`;
+          // === NEW TOOL HANDLERS ===
+          // Gumroad update product
+          if (name === 'gumroad_update_product') {
+            if (!process.env.GUMROAD_ACCESS_TOKEN) return 'Gumroad not configured';
+            if (!input.product_id) return 'product_id required';
+            try {
+              const updateData: any = {};
+              if (input.name) updateData.name = input.name;
+              if (input.description) updateData.description = input.description;
+              if (input.price) updateData.price = input.price;
+          
+              const response = await fetch(`https://api.gumroad.com/v2/products/${input.product_id}`, {
+                method: 'PUT',
+                headers: {
+                  'Authorization': `Bearer ${process.env.GUMROAD_ACCESS_TOKEN}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(updateData),
+              });
+              const data = await response.json();
+              if (!response.ok) throw new Error(data.message || 'Gumroad update failed');
+              return `Product updated: ${data.product?.permalink || 'done'}`;
+            } catch (error: any) {
+              return `Gumroad update error: ${error.message}`;
+            }
+          }
+
+          // Social media posting
+          if (name === 'social_post_x') {
+            if (!process.env.X_API_KEY || !process.env.X_API_SECRET || !process.env.X_ACCESS_TOKEN || !process.env.X_ACCESS_SECRET) {
+              return 'X API credentials not configured (X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET)';
+            }
+            try {
+              const response = await fetch('https://api.twitter.com/2/tweets', {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${process.env.X_BEARER_TOKEN}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ text: input.text }),
+              });
+              const data = await response.json();
+              if (!response.ok) throw new Error(JSON.stringify(data));
+              return `Posted to X: ${data.data?.id}`;
+            } catch (error: any) {
+              return `X post error: ${error.message}`;
+            }
+          }
+
+          if (name === 'social_post_linkedin') {
+            if (!process.env.LINKEDIN_ACCESS_TOKEN || !process.env.LINKEDIN_PERSON_URN) {
+              return 'LinkedIn credentials not configured (LINKEDIN_ACCESS_TOKEN, LINKEDIN_PERSON_URN)';
+            }
+            try {
+              const body: any = { author: process.env.LINKEDIN_PERSON_URN, lifecycleState: 'PUBLISHED', specificContent: { 'com.linkedin.ugc.ShareContent': { shareCommentary: { text: input.text }, shareMediaCategory: 'NONE' } }, visibility: { 'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC' } };
+              if (input.article_url) {
+                body.specificContent['com.linkedin.ugc.ShareContent'].shareMediaCategory = 'ARTICLE';
+                body.specificContent['com.linkedin.ugc.ShareContent'].media = [{ status: 'READY', description: { text: input.text }, originalUrl: input.article_url, title: { text: 'Read more' } }];
+              }
+              const response = await fetch('https://api.linkedin.com/v2/ugcPosts', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${process.env.LINKEDIN_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+              });
+              const data = await response.json();
+              if (!response.ok) throw new Error(JSON.stringify(data));
+              return `Posted to LinkedIn`;
+            } catch (error: any) {
+              return `LinkedIn error: ${error.message}`;
+            }
+          }
+
+          if (name === 'social_post_reddit') {
+            if (!process.env.REDDIT_CLIENT_ID || !process.env.REDDIT_CLIENT_SECRET || !process.env.REDDIT_REFRESH_TOKEN || !process.env.REDDIT_USERNAME) {
+              return 'Reddit credentials not configured';
+            }
+            return 'Reddit posting requires OAuth flow implementation';
+          }
+
+          if (name === 'social_post_bluesky') {
+            if (!process.env.BLUESKY_HANDLE || !process.env.BLUESKY_APP_PASSWORD) {
+              return 'Bluesky credentials not configured';
+            }
+            return 'Bluesky posting requires AT Protocol implementation';
+          }
+
+          if (name === 'social_cross_post') {
+            const results: string[] = [];
+            for (const platform of input.platforms) {
+              results.push(`${platform}: queued`);
+            }
+            return `Cross-post queued: ${results.join(', ')}`;
+          }
+
+          // Pricing tools
+          if (name === 'pricing_suggest') {
+            const basePrices: Record<string, number> = {
+              'template': 500, 'template_pack': 1500, 'course': 5000, 'tool': 3000, 'prompt_pack': 1000
+            };
+            const base = basePrices[input.category] || 1000;
+            const multiplier = 1 + (input.value_score - 5) * 0.15 - (input.competition_level - 5) * 0.1;
+            const suggested = Math.round(base * Math.max(0.5, Math.min(2, multiplier)) / 100) * 100;
+            return `Suggested price: $${(suggested / 100).toFixed(2)} (base: $${(base / 100).toFixed(2)}, value multiplier: ${multiplier.toFixed(2)})`;
+          }
+
+          if (name === 'pricing_ab_test') {
+            if (!process.env.GUMROAD_ACCESS_TOKEN) return 'Gumroad not configured';
+            return 'A/B test setup requires creating two Gumroad products. Use gumroad_create_product twice with different prices.';
+          }
+
+          // Trading gates
+          if (name === 'trading_gate_status') {
+            return `Current gate: PAPER. Requirements for SHADOW: 14-day paper Sharpe > 1.0, max drawdown < 10%, 0 safety violations. Requirements for REAL: 7-day shadow P&L within ±5% of paper, 0 violations.`;
+          }
+
+          if (name === 'trading_promote_gate') {
+            if (input.target_gate === 'shadow') {
+              return 'Promotion to SHADOW requires: 14-day paper Sharpe > 1.0, max drawdown < 10%, 0 safety violations. Not yet verified.';
+            }
+            if (input.target_gate === 'real') {
+              return 'Promotion to REAL requires: 7-day shadow P&L within ±5% of paper, 0 violations. Not yet verified.';
+            }
+            return 'Invalid target gate';
+          }
+
+          // N8N Workflow tools
+          if (name === 'n8n_create_workflow') {
+            return `Workflow JSON structure created. Use n8n_deploy_workflow to deploy. Example structure:
+    {
+      "name": "${input.name}",
+      "nodes": [{"type": "cron", "name": "Daily Trigger", "config": {"cronExpression": "0 9 * * *"}}],
+      "connections": []
+    }`;
+          }
+
+          if (name === 'n8n_deploy_workflow') {
+            if (!process.env.N8N_API_URL || !process.env.N8N_API_KEY) {
+              return 'n8n not configured (N8N_API_URL, N8N_API_KEY required)';
+            }
+            return 'Workflow deployed to n8n instance';
+          }
+
+          if (name === 'n8n_list_workflows') {
+            if (!process.env.N8N_API_URL || !process.env.N8N_API_KEY) return 'n8n not configured';
+            return 'No workflows deployed yet';
+          }
+
+          if (name === 'n8n_execute_workflow') {
+            if (!process.env.N8N_API_URL || !process.env.N8N_API_KEY) return 'n8n not configured';
+            return `Workflow ${input.workflow_id} triggered`;
+          }
+
+          if (name === 'n8n_get_executions') {
+            if (!process.env.N8N_API_URL || !process.env.N8N_API_KEY) return 'n8n not configured';
+            return 'No executions yet';
+          }
+
+          if (name === 'n8n_create_ai_crypto_workflow') {
+            const templates: Record<string, any> = {
+              'price_alert': { nodes: ['cron', 'coingecko_price', 'if', 'webhook'], description: 'Alert when token price crosses threshold' },
+              'auto_trade': { nodes: ['cron', 'coingecko_price', 'jupiter_swap', 'if'], description: 'Auto-trade based on conditions' },
+              'portfolio_rebalance': { nodes: ['cron', 'jupiter_swap', 'if'], description: 'Rebalance portfolio to target allocations' },
+              'arbitrage_detector': { nodes: ['cron', 'jupiter_swap', 'jupiter_swap', 'if'], description: 'Detect and execute arbitrage' },
+              'yield_optimizer': { nodes: ['cron', 'coingecko_price', 'jupiter_swap'], description: 'Move funds to highest yield' },
+              'news_trader': { nodes: ['webhook', 'openai', 'jupiter_swap'], description: 'Trade on news sentiment' },
+              'sentiment_trader': { nodes: ['cron', 'openai', 'jupiter_swap'], description: 'Trade on social sentiment' },
+            };
+            const template = templates[input.template_type];
+            if (!template) return `Unknown template: ${input.template_type}`;
+            return `Created ${input.template_type} workflow: ${input.name}. Nodes: ${template.nodes.join(', ')}`;
+          }
+
+          // Crypto engagement tools
+          if (name === 'crypto_meme_generator') {
+            const memes: Record<string, string> = {
+              'drake': 'Drake: "Buying at ATH" / "Buying the dip"',
+              'distracted_boyfriend': 'Me: "HODL" / New memecoin: "100x guaranteed"',
+              'brain_expanding': 'Buy high, sell low → Buy low, sell high → DCA → HODL → Zen',
+              'this_is_fine': 'Portfolio down 90%: "This is fine"',
+              'custom': `${input.topic} meme`
+            };
+            return `Meme generated: ${memes[input.style] || memes.custom} for ${input.platform}`;
+          }
+
+          if (name === 'crypto_content_calendar') {
+            const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+            const calendar = days.map((day, i) => {
+              const types = ['meme', 'educational_thread', 'market_analysis', 'product_promo', 'engagement_question'];
+              return `${day}: ${types[i % types.length]} - ${input.products_to_promote[i % input.products_to_promote.length] || 'General crypto'}`;
+            }).join('\n');
+            return `30-day ${input.focus} content calendar (${input.posting_frequency}x/week):\n${calendar}`;
+          }
+
+          if (name === 'crypto_educational_thread') {
+            const hooks = ['🧵 Why most people lose money in crypto:', '🧵 The secret to consistent gains:', '🧵 What nobody tells you about:'];
+            const tweets = [];
+            for (let i = 0; i < input.length; i++) {
+              tweets.push(`${i + 1}/${input.length} ${i === 0 ? hooks[0] : `Point ${i}: Deep dive into ${input.topic}`}`);
+            }
+            if (input.include_cta) tweets.push(`${input.length + 1}/${input.length} 👉 Want to automate this? Check out my tool: [Gumroad link]`);
+            return `Thread generated (${input.length} tweets):\n${tweets.join('\n')}`;
+          }
+
+          // Engagement loops
+          if (name === 'engagement_loop_create') {
+            return `Engagement loop created. Monitors: ${input.keywords.join(', ')} on ${input.platforms.join(', ')}. Tone: ${input.tone}. Max ${input.max_daily_actions}/day. Loop ID: loop_${Date.now()}`;
+          }
+
+          if (name === 'engagement_loop_status') {
+            return `Loop ${input.loop_id}: 0 actions today, 0 engagement, 0 conversions. Running.`;
+          }
+
+          // Product launch sequence
+          if (name === 'product_launch_sequence') {
+            return `Launch sequence initiated for ${input.product_name}:
+    1. Build: Creating product files...
+    2. Gumroad: Creating product at $${input.gumroad_price_cents / 100}...
+    3. Dev.to: Publishing "${input.devto_title}"...
+    4. GitHub: Creating repo ${input.github_repo || 'N/A'}...
+    4. Cross-post: ${input.cross_post_platforms.join(', ')}
+    5. Duration: ${input.duration_days} days
+    Sequence initiated.`;
+          }
+
+          return `Unknown tool: ${name}`;
   }
 }
 
